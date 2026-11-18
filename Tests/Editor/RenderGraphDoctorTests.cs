@@ -403,5 +403,87 @@ public class ClosurePass : ScriptableRenderPass
                 Object.DestroyImmediate(goBad);
             }
         }
+
+        [Test]
+        public void McpBridge_AutoFix_UpgradesInstanceMethodGroupsAnonymousDelegatesSkipsCommentsAndHandlesIfZeroInShaders()
+        {
+            const string passWithMethodGroupAndDelegateAndComment = @"
+public class ComplexRenderGraphPass : ScriptableRenderPass
+{
+    private void ExecuteInstanceMethod(PassData data, RasterGraphContext ctx)
+    {
+    }
+
+    public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
+    {
+        // builder.SetRenderFunc((PassData d, RasterGraphContext c) => {});
+        string doc = ""builder.SetRenderFunc((PassData d, RasterGraphContext c) => {})"";
+        using (var b1 = renderGraph.AddRasterRenderPass<PassData>(""P1"", out var d1))
+        {
+            b1.SetRenderFunc<PassData>(ExecuteInstanceMethod);
+        }
+        using (var b2 = renderGraph.AddRasterRenderPass<PassData>(""P2"", out var d2))
+        {
+            b2.SetRenderFunc(delegate (PassData data, RasterGraphContext ctx) { });
+        }
+    }
+}";
+
+            RenderPassSourceAutoFixReport fixReport = RenderGraphDoctorMcpBridge.AutoFixRenderPassCSharpSource(
+                passWithMethodGroupAndDelegateAndComment,
+                "Assets/ComplexRenderGraphPass.cs");
+
+            Assert.IsTrue(fixReport.modified);
+            Assert.IsTrue(fixReport.beforeAudit.hasNonStaticRenderFuncClosureRisk);
+            Assert.IsFalse(fixReport.afterAudit.hasNonStaticRenderFuncClosureRisk);
+            Assert.IsTrue(fixReport.afterAudit.usesStaticRenderFuncLambda);
+            StringAssert.Contains("private static void ExecuteInstanceMethod(", fixReport.patchedSource);
+            StringAssert.Contains("b2.SetRenderFunc(static delegate (PassData data, RasterGraphContext ctx)", fixReport.patchedSource);
+            // Comment and string literal must remain untouched
+            StringAssert.Contains("// builder.SetRenderFunc((PassData d, RasterGraphContext c) => {});", fixReport.patchedSource);
+            StringAssert.Contains("string doc = \"builder.SetRenderFunc((PassData d, RasterGraphContext c) => {})\"", fixReport.patchedSource);
+
+            // Shader BRG auditor must ignore #if 0 blocks and preserve URLs in string literals
+            const string shaderWithUrlAndIfZero = @"
+Shader ""Custom/UrlAndIfZeroBrg""
+{
+    Properties
+    {
+        _Url (""https://docs.unity3d.com/* not a comment */"", Float) = 1.0
+    }
+    SubShader
+    {
+        Pass
+        {
+            HLSLPROGRAM
+            #if 0
+                #pragma target 4.5
+                #pragma multi_compile _ DOTS_INSTANCING_ON
+                CBUFFER_START(UnityPerMaterial) float4 _C; CBUFFER_END
+            #else
+                #pragma target 3.0
+                float4 _C;
+            #endif
+            ENDHLSL
+        }
+    }
+}";
+            ShaderResidentDrawerAudit brgAudit = GpuResidentDrawerAuditor.AuditShaderSourceForResidentDrawer(
+                shaderWithUrlAndIfZero,
+                "Assets/UrlAndIfZeroBrg.shader");
+            Assert.AreEqual("Custom/UrlAndIfZeroBrg", brgAudit.shaderName);
+            Assert.IsFalse(brgAudit.hasTarget45OrHigher);
+            Assert.IsFalse(brgAudit.hasDotsInstancingPragma);
+            Assert.IsFalse(brgAudit.hasSrpBatcherCBuffer);
+            Assert.IsFalse(brgAudit.isCompatibleWithResidentDrawer);
+
+            // JSON-RPC 2.0 with alphabetical key ordering ("arguments" before "name", "id" at end)
+            string reorderedJson =
+                "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"arguments\":{\"source\":\"Shader \\\"Custom/Decoy\\\" { /* \\\"id\\\": 999, \\\"name\\\": \\\"evil\\\" */ }\",\"assetPath\":\"Assets/Decoy.shader\"},\"name\":\"rendergraph_doctor.audit_shader_brg\"},\"id\":88}";
+            string rpcRes = RenderGraphDoctorMcpBridge.HandleJsonRpcRequest(reorderedJson);
+            StringAssert.Contains("\"id\":88", rpcRes);
+            StringAssert.Contains("\"shaderName\":\"Custom/Decoy\"", rpcRes);
+            Assert.IsNotNull(typeof(RenderGraphDoctorCli).GetMethod("RunMcpAuditJson", System.Type.EmptyTypes));
+        }
     }
 }

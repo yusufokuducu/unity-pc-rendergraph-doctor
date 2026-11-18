@@ -67,7 +67,11 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
         public const string McpProtocolVersion = "2024-11-05";
 
         private static readonly Regex NonStaticSetRenderFuncLambdaRegex = new Regex(
-            @"(\.\s*SetRenderFunc\s*(?:<[^>]+>\s*)?\(\s*)(?!static\b)(\([^)]*\)\s*=>|[A-Za-z_]\w*\s*=>)",
+            @"(\.\s*SetRenderFunc\s*(?:<[^>]+>\s*)?\(\s*)(?!static\b)(\([^)]*\)\s*=>|[A-Za-z_]\w*\s*=>|delegate\b)",
+            RegexOptions.Compiled);
+
+        private static readonly Regex SetRenderFuncMethodGroupCallRegex = new Regex(
+            @"\.\s*SetRenderFunc\s*(?:<[^>]+>\s*)?\(\s*([A-Za-z_]\w*)\s*\)",
             RegexOptions.Compiled);
 
         public static ResidentDrawerHeatmapSummary ComputeHeatmapSummary(
@@ -221,9 +225,13 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
                 return report;
             }
 
+            bool[] mask = BuildCSharpCommentAndStringMask(rawCSharpSource);
             int upgradedLambdas = 0;
             string working = NonStaticSetRenderFuncLambdaRegex.Replace(rawCSharpSource, match =>
             {
+                if (match.Index < mask.Length && mask[match.Index])
+                    return match.Value;
+
                 upgradedLambdas++;
                 return match.Groups[1].Value + "static " + match.Groups[2].Value;
             });
@@ -231,7 +239,53 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
             if (upgradedLambdas > 0)
             {
                 report.appliedFixes.Add(
-                    $"Upgraded {upgradedLambdas} non-static SetRenderFunc lambda(s) to 'static' to eliminate per-frame GC closure allocations.");
+                    $"Upgraded {upgradedLambdas} non-static SetRenderFunc lambda/delegate callback(s) to 'static' to eliminate per-frame GC closure allocations.");
+            }
+
+            // Also upgrade instance method groups passed to SetRenderFunc(MethodName) -> static void MethodName(...)
+            bool[] methodMask = BuildCSharpCommentAndStringMask(working);
+            MatchCollection methodGroups = SetRenderFuncMethodGroupCallRegex.Matches(working);
+            var candidateMethods = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < methodGroups.Count; i++)
+            {
+                Match m = methodGroups[i];
+                if (m.Index < methodMask.Length && methodMask[m.Index])
+                    continue;
+                string methodName = m.Groups[1].Value;
+                if (!string.Equals(methodName, "static", StringComparison.Ordinal) &&
+                    !string.Equals(methodName, "delegate", StringComparison.Ordinal))
+                {
+                    candidateMethods.Add(methodName);
+                }
+            }
+
+            int upgradedMethods = 0;
+            foreach (string methodName in candidateMethods)
+            {
+                var declRegex = new Regex(
+                    $@"(\b(?:private|protected|public|internal)[ \t]+)?(?<!\bstatic[ \t]+)(\bvoid[ \t]+{Regex.Escape(methodName)}[ \t]*\()",
+                    RegexOptions.Compiled);
+                bool[] curMask = BuildCSharpCommentAndStringMask(working);
+                working = declRegex.Replace(working, m =>
+                {
+                    if (m.Index < curMask.Length && curMask[m.Index])
+                        return m.Value;
+                    // Check that 'static' does not already precede on the same declaration header
+                    int checkStart = Math.Max(0, m.Index - 24);
+                    string prefixCheck = working.Substring(checkStart, m.Index - checkStart);
+                    if (Regex.IsMatch(prefixCheck, @"\bstatic\s*$"))
+                        return m.Value;
+
+                    upgradedMethods++;
+                    string accessMod = m.Groups[1].Success ? m.Groups[1].Value : string.Empty;
+                    return accessMod + "static " + m.Groups[2].Value;
+                });
+            }
+
+            if (upgradedMethods > 0)
+            {
+                report.appliedFixes.Add(
+                    $"Upgraded {upgradedMethods} instance SetRenderFunc method group target(s) to 'static void' to eliminate delegate allocation.");
             }
 
             RenderGraphSourceAuditResult after = RenderGraphAssemblyAuditor.AnalyzeRenderPassCSharpSource(working, safePath);
@@ -240,6 +294,80 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
             report.afterAudit = after;
 
             return report;
+        }
+
+        internal static bool[] BuildCSharpCommentAndStringMask(string source)
+        {
+            int len = source != null ? source.Length : 0;
+            var mask = new bool[len];
+            int i = 0;
+            while (i < len)
+            {
+                char c = source[i];
+                if (c == '/' && i + 1 < len && source[i + 1] == '*')
+                {
+                    mask[i++] = true;
+                    mask[i++] = true;
+                    while (i < len)
+                    {
+                        if (source[i] == '*' && i + 1 < len && source[i + 1] == '/')
+                        {
+                            mask[i++] = true;
+                            mask[i++] = true;
+                            break;
+                        }
+                        mask[i++] = true;
+                    }
+                    continue;
+                }
+
+                if (c == '/' && i + 1 < len && source[i + 1] == '/')
+                {
+                    while (i < len && source[i] != '\n' && source[i] != '\r')
+                        mask[i++] = true;
+                    continue;
+                }
+
+                if (c == '@' && i + 1 < len && source[i + 1] == '"')
+                {
+                    mask[i++] = true;
+                    mask[i++] = true;
+                    while (i < len)
+                    {
+                        if (source[i] == '"')
+                        {
+                            mask[i++] = true;
+                            if (i < len && source[i] == '"')
+                            {
+                                mask[i++] = true;
+                                continue;
+                            }
+                            break;
+                        }
+                        mask[i++] = true;
+                    }
+                    continue;
+                }
+
+                if (c == '"' || c == '\'')
+                {
+                    char quote = c;
+                    mask[i++] = true;
+                    while (i < len)
+                    {
+                        char sc = source[i];
+                        mask[i++] = true;
+                        if (sc == '\\' && i < len)
+                            mask[i++] = true;
+                        else if (sc == quote || sc == '\n' || sc == '\r')
+                            break;
+                    }
+                    continue;
+                }
+
+                i++;
+            }
+            return mask;
         }
 
         public static string ExportFullMcpReportToJson(
@@ -310,9 +438,12 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
 
             if (string.Equals(method, "tools/call", StringComparison.Ordinal))
             {
-                string toolName = ExtractJsonStringField(trimmed, "name");
+                string paramsObj = ExtractJsonObjectField(trimmed, "params") ?? trimmed;
+                string toolName = ExtractJsonStringField(paramsObj, "name");
                 if (string.IsNullOrEmpty(toolName))
                     return BuildJsonRpcError(idRaw, -32602, "Invalid params: Missing tool 'name' in tools/call.");
+
+                string argsObj = ExtractJsonObjectField(paramsObj, "arguments") ?? paramsObj;
 
                 if (string.Equals(toolName, "rendergraph_doctor.audit_scene_renderers", StringComparison.Ordinal))
                 {
@@ -335,8 +466,8 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
 
                 if (string.Equals(toolName, "rendergraph_doctor.audit_shader_brg", StringComparison.Ordinal))
                 {
-                    string source = ExtractJsonStringField(trimmed, "source");
-                    string assetPath = ExtractJsonStringField(trimmed, "assetPath") ?? "<McpInlineShader.shader>";
+                    string source = ExtractJsonStringField(argsObj, "source");
+                    string assetPath = ExtractJsonStringField(argsObj, "assetPath") ?? "<McpInlineShader.shader>";
                     ShaderResidentDrawerAudit shaderAudit = GpuResidentDrawerAuditor.AuditShaderSourceForResidentDrawer(source ?? string.Empty, assetPath);
                     string payload = SerializeShaderBrgAuditJson(shaderAudit);
                     return BuildJsonRpcToolCallResult(idRaw, payload);
@@ -344,8 +475,8 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
 
                 if (string.Equals(toolName, "rendergraph_doctor.audit_renderpass_csharp", StringComparison.Ordinal))
                 {
-                    string source = ExtractJsonStringField(trimmed, "source");
-                    string filePath = ExtractJsonStringField(trimmed, "filePath") ?? "<McpInlinePass.cs>";
+                    string source = ExtractJsonStringField(argsObj, "source");
+                    string filePath = ExtractJsonStringField(argsObj, "filePath") ?? "<McpInlinePass.cs>";
                     RenderGraphSourceAuditResult passAudit = RenderGraphAssemblyAuditor.AnalyzeRenderPassCSharpSource(source ?? string.Empty, filePath);
                     string payload = SerializePassSourceAuditJson(passAudit);
                     return BuildJsonRpcToolCallResult(idRaw, payload);
@@ -353,8 +484,8 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
 
                 if (string.Equals(toolName, "rendergraph_doctor.autofix_renderpass_csharp", StringComparison.Ordinal))
                 {
-                    string source = ExtractJsonStringField(trimmed, "source");
-                    string filePath = ExtractJsonStringField(trimmed, "filePath") ?? "<McpInlinePass.cs>";
+                    string source = ExtractJsonStringField(argsObj, "source");
+                    string filePath = ExtractJsonStringField(argsObj, "filePath") ?? "<McpInlinePass.cs>";
                     RenderPassSourceAutoFixReport fixReport = AutoFixRenderPassCSharpSource(source ?? string.Empty, filePath);
                     string payload = SerializePassAutoFixJson(fixReport);
                     return BuildJsonRpcToolCallResult(idRaw, payload);
@@ -589,16 +720,138 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
 
         internal static string ExtractJsonRpcIdRaw(string json)
         {
-            var m = Regex.Match(json, @"""id""\s*:\s*(""[^""\\]*(?:\\.[^""\\]*)*""|-?\d+|null)");
-            return m.Success ? m.Groups[1].Value : "null";
+            if (TryGetDirectJsonPropertyValue(json, "id", out string rawVal) && !string.IsNullOrEmpty(rawVal))
+            {
+                return rawVal;
+            }
+            return "null";
+        }
+
+        internal static string ExtractJsonObjectField(string json, string fieldName)
+        {
+            if (TryGetDirectJsonPropertyValue(json, fieldName, out string rawVal) &&
+                !string.IsNullOrEmpty(rawVal) &&
+                rawVal[0] == '{')
+            {
+                return rawVal;
+            }
+            return null;
         }
 
         internal static string ExtractJsonStringField(string json, string fieldName)
         {
-            string pattern = $@"""{Regex.Escape(fieldName)}""\s*:\s*""((?:[^""\\]|\\.)*)""";
-            Match m = Regex.Match(json, pattern);
-            if (!m.Success) return null;
-            return UnescapeJsonString(m.Groups[1].Value);
+            if (TryGetDirectJsonPropertyValue(json, fieldName, out string rawVal) &&
+                !string.IsNullOrEmpty(rawVal) &&
+                rawVal.Length >= 2 &&
+                rawVal[0] == '"' &&
+                rawVal[rawVal.Length - 1] == '"')
+            {
+                return UnescapeJsonString(rawVal.Substring(1, rawVal.Length - 2));
+            }
+            return null;
+        }
+
+        internal static bool TryGetDirectJsonPropertyValue(string jsonObject, string propertyName, out string rawValue)
+        {
+            rawValue = null;
+            if (string.IsNullOrWhiteSpace(jsonObject) || string.IsNullOrEmpty(propertyName))
+                return false;
+
+            string s = jsonObject.Trim();
+            if (s.Length < 2 || s[0] != '{')
+                return false;
+
+            int i = 1;
+            int len = s.Length;
+            while (i < len)
+            {
+                while (i < len && (char.IsWhiteSpace(s[i]) || s[i] == ','))
+                    i++;
+                if (i >= len || s[i] == '}')
+                    break;
+
+                if (s[i] != '"')
+                    break;
+
+                int keyStart = i + 1;
+                i = SkipJsonStringLiteral(s, i);
+                int keyEnd = Math.Max(keyStart, i - 1);
+                string key = UnescapeJsonString(s.Substring(keyStart, keyEnd - keyStart));
+
+                while (i < len && char.IsWhiteSpace(s[i]))
+                    i++;
+                if (i >= len || s[i] != ':')
+                    break;
+                i++;
+
+                while (i < len && char.IsWhiteSpace(s[i]))
+                    i++;
+                if (i >= len)
+                    break;
+
+                int valStart = i;
+                i = SkipJsonValue(s, i);
+                int valEnd = i;
+
+                if (string.Equals(key, propertyName, StringComparison.Ordinal))
+                {
+                    rawValue = s.Substring(valStart, valEnd - valStart).Trim();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static int SkipJsonStringLiteral(string s, int quoteStartIdx)
+        {
+            int i = quoteStartIdx + 1;
+            while (i < s.Length)
+            {
+                char c = s[i++];
+                if (c == '\\' && i < s.Length)
+                    i++;
+                else if (c == '"')
+                    break;
+            }
+            return i;
+        }
+
+        private static int SkipJsonValue(string s, int valStartIdx)
+        {
+            int i = valStartIdx;
+            if (i >= s.Length)
+                return i;
+
+            char c = s[i];
+            if (c == '"')
+                return SkipJsonStringLiteral(s, i);
+
+            if (c == '{' || c == '[')
+            {
+                int depth = 0;
+                while (i < s.Length)
+                {
+                    char ch = s[i];
+                    if (ch == '"')
+                    {
+                        i = SkipJsonStringLiteral(s, i);
+                        continue;
+                    }
+                    if (ch == '{' || ch == '[') depth++;
+                    else if (ch == '}' || ch == ']')
+                    {
+                        depth--;
+                        if (depth == 0)
+                            return i + 1;
+                    }
+                    i++;
+                }
+                return i;
+            }
+
+            while (i < s.Length && s[i] != ',' && s[i] != '}' && s[i] != ']' && !char.IsWhiteSpace(s[i]))
+                i++;
+            return i;
         }
 
         private static string UnescapeJsonString(string escaped)

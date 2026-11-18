@@ -233,10 +233,10 @@ namespace YusufOkuducu.PcRenderGraphDoctor
                 return audit;
             }
 
-            string clean = BlockCommentRegex.Replace(rawShaderSource, " ");
-            clean = LineCommentRegex.Replace(clean, string.Empty);
+            SanitizeShaderCommentsAndStrings(rawShaderSource, out string uncommentedWithStrings, out string uncommentedNoStrings);
+            string clean = StripDisabledPreprocessorBlocks(uncommentedNoStrings);
 
-            Match nameMatch = ShaderNameRegex.Match(clean);
+            Match nameMatch = ShaderNameRegex.Match(uncommentedWithStrings);
             if (nameMatch.Success)
                 audit.shaderName = nameMatch.Groups[1].Value.Trim();
 
@@ -264,6 +264,144 @@ namespace YusufOkuducu.PcRenderGraphDoctor
             }
 
             return audit;
+        }
+
+        private static void SanitizeShaderCommentsAndStrings(
+            string rawSource,
+            out string uncommentedWithStrings,
+            out string uncommentedNoStrings)
+        {
+            int len = rawSource.Length;
+            var sbWithStrings = new StringBuilder(len);
+            var sbNoStrings = new StringBuilder(len);
+            int i = 0;
+
+            while (i < len)
+            {
+                char c = rawSource[i];
+                if (c == '/' && i + 1 < len && rawSource[i + 1] == '*')
+                {
+                    sbWithStrings.Append(' ');
+                    sbNoStrings.Append(' ');
+                    i += 2;
+                    while (i < len)
+                    {
+                        if (rawSource[i] == '*' && i + 1 < len && rawSource[i + 1] == '/')
+                        {
+                            i += 2;
+                            break;
+                        }
+                        if (rawSource[i] == '\n')
+                        {
+                            sbWithStrings.Append('\n');
+                            sbNoStrings.Append('\n');
+                        }
+                        i++;
+                    }
+                    continue;
+                }
+
+                if (c == '/' && i + 1 < len && rawSource[i + 1] == '/')
+                {
+                    i += 2;
+                    while (i < len && rawSource[i] != '\n' && rawSource[i] != '\r')
+                        i++;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    sbWithStrings.Append('"');
+                    sbNoStrings.Append("\"\"");
+                    i++;
+                    while (i < len)
+                    {
+                        char sc = rawSource[i++];
+                        sbWithStrings.Append(sc);
+                        if (sc == '\\' && i < len)
+                            sbWithStrings.Append(rawSource[i++]);
+                        else if (sc == '"' || sc == '\n' || sc == '\r')
+                            break;
+                    }
+                    continue;
+                }
+
+                sbWithStrings.Append(c);
+                sbNoStrings.Append(c);
+                i++;
+            }
+
+            uncommentedWithStrings = sbWithStrings.ToString();
+            uncommentedNoStrings = sbNoStrings.ToString();
+        }
+
+        private static string StripDisabledPreprocessorBlocks(string source)
+        {
+            var sb = new StringBuilder(source.Length);
+            var stack = new Stack<(bool parentActive, bool branchActive, bool seenActive)>();
+            bool currentlyActive = true;
+
+            using (var reader = new System.IO.StringReader(source))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    string trimmed = line.TrimStart();
+                    if (trimmed.StartsWith("#", StringComparison.Ordinal))
+                    {
+                        string directive = trimmed.Substring(1).TrimStart();
+                        if (directive.StartsWith("ifdef", StringComparison.Ordinal) ||
+                            directive.StartsWith("ifndef", StringComparison.Ordinal))
+                        {
+                            stack.Push((currentlyActive, currentlyActive, currentlyActive));
+                            sb.AppendLine();
+                            continue;
+                        }
+                        if (directive.StartsWith("if", StringComparison.Ordinal) &&
+                            (directive.Length == 2 || char.IsWhiteSpace(directive[2]) || directive[2] == '('))
+                        {
+                            string expr = directive.Substring(2).Trim().Trim('(', ')').Trim();
+                            bool cond = !string.Equals(expr, "0", StringComparison.Ordinal) &&
+                                        !string.Equals(expr, "false", StringComparison.OrdinalIgnoreCase);
+                            bool active = currentlyActive && cond;
+                            stack.Push((currentlyActive, active, active));
+                            currentlyActive = active;
+                            sb.AppendLine();
+                            continue;
+                        }
+                        if (directive.StartsWith("else", StringComparison.Ordinal) &&
+                            (directive.Length == 4 || char.IsWhiteSpace(directive[4])))
+                        {
+                            if (stack.Count > 0)
+                            {
+                                var top = stack.Pop();
+                                bool active = top.parentActive && !top.seenActive;
+                                stack.Push((top.parentActive, active, true));
+                                currentlyActive = active;
+                            }
+                            sb.AppendLine();
+                            continue;
+                        }
+                        if (directive.StartsWith("endif", StringComparison.Ordinal) &&
+                            (directive.Length == 5 || char.IsWhiteSpace(directive[5])))
+                        {
+                            if (stack.Count > 0)
+                            {
+                                var top = stack.Pop();
+                                currentlyActive = top.parentActive;
+                            }
+                            sb.AppendLine();
+                            continue;
+                        }
+                    }
+
+                    if (currentlyActive)
+                        sb.AppendLine(line);
+                    else
+                        sb.AppendLine();
+                }
+            }
+            return sb.ToString();
         }
 
         public static string BuildRecommendation(ResidentDrawerDisqualifier flags)
