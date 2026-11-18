@@ -60,6 +60,7 @@ namespace YusufOkuducu.PcRenderGraphDoctor
         public int negativeScaleViolations;
         public int staticBatchingConflicts;
         public int lppvViolations;
+        public int shaderIncompatibilityViolations;
         public int desktopOverdrawRiskMeshes;
         public List<RendererEligibilityRecord> records = new List<RendererEligibilityRecord>();
 
@@ -71,7 +72,7 @@ namespace YusufOkuducu.PcRenderGraphDoctor
             sb.AppendLine($"- **Total MeshRenderers**: {totalMeshRenderers}");
             sb.AppendLine($"- **Eligible**: {eligibleRenderers} | **Disqualified**: {disqualifiedRenderers}");
             sb.AppendLine($"- **MaterialPropertyBlock Breaks**: {propertyBlockViolations} | **Instancing Disabled**: {instancingDisabledViolations}");
-            sb.AppendLine($"- **StaticBatching Conflicts**: {staticBatchingConflicts} | **Negative Scale**: {negativeScaleViolations} | **LPPV Used**: {lppvViolations}");
+            sb.AppendLine($"- **StaticBatching Conflicts**: {staticBatchingConflicts} | **Negative Scale**: {negativeScaleViolations} | **LPPV Used**: {lppvViolations} | **Shader Missing DOTS Instancing**: {shaderIncompatibilityViolations}");
             sb.AppendLine();
             sb.AppendLine("| GameObject | Triangles | Material (Shader) | Disqualifiers | Recommendation |");
             sb.AppendLine("|---|---:|---|---|---|");
@@ -107,7 +108,8 @@ namespace YusufOkuducu.PcRenderGraphDoctor
 
         public static ResidentDrawerAuditReport AuditSceneRenderers(
             IReadOnlyList<MeshRenderer> renderers,
-            Func<GameObject, bool> isStaticBatchingEnabledPredicate = null)
+            Func<GameObject, bool> isStaticBatchingEnabledPredicate = null,
+            Func<Shader, bool> isShaderCompatiblePredicate = null)
         {
             var report = new ResidentDrawerAuditReport();
             if (renderers == null) return report;
@@ -121,7 +123,13 @@ namespace YusufOkuducu.PcRenderGraphDoctor
                 bool hasStaticBatchFlag = isStaticBatchingEnabledPredicate != null &&
                                           isStaticBatchingEnabledPredicate(mr.gameObject);
 
-                RendererEligibilityRecord rec = AnalyzeRenderer(mr, hasStaticBatchFlag);
+                bool shaderCompatible = true;
+                if (isShaderCompatiblePredicate != null && mr.sharedMaterial != null && mr.sharedMaterial.shader != null)
+                {
+                    shaderCompatible = isShaderCompatiblePredicate(mr.sharedMaterial.shader);
+                }
+
+                RendererEligibilityRecord rec = AnalyzeRenderer(mr, hasStaticBatchFlag, shaderCompatible);
                 if (rec.IsEligible)
                 {
                     report.eligibleRenderers++;
@@ -139,6 +147,8 @@ namespace YusufOkuducu.PcRenderGraphDoctor
                         report.staticBatchingConflicts++;
                     if ((rec.disqualifiers & ResidentDrawerDisqualifier.LightProbeProxyVolumeUsed) != 0)
                         report.lppvViolations++;
+                    if ((rec.disqualifiers & ResidentDrawerDisqualifier.ShaderMissingDotsInstancing) != 0)
+                        report.shaderIncompatibilityViolations++;
                     if ((rec.disqualifiers & ResidentDrawerDisqualifier.HighPolyOverdrawRiskWithoutLOD) != 0)
                         report.desktopOverdrawRiskMeshes++;
                 }
@@ -150,7 +160,10 @@ namespace YusufOkuducu.PcRenderGraphDoctor
             return report;
         }
 
-        public static RendererEligibilityRecord AnalyzeRenderer(MeshRenderer mr, bool hasStaticBatchingFlag = false)
+        public static RendererEligibilityRecord AnalyzeRenderer(
+            MeshRenderer mr,
+            bool hasStaticBatchingFlag = false,
+            bool isShaderCompatibleWithResidentDrawer = true)
         {
             var flags = ResidentDrawerDisqualifier.None;
             var mf = mr.GetComponent<MeshFilter>();
@@ -174,6 +187,9 @@ namespace YusufOkuducu.PcRenderGraphDoctor
 
                 if (mat.renderQueue >= 2500)
                     flags |= ResidentDrawerDisqualifier.TransparentOrNonOpaqueQueue;
+
+                if (!isShaderCompatibleWithResidentDrawer)
+                    flags |= ResidentDrawerDisqualifier.ShaderMissingDotsInstancing;
             }
 
             Vector3 scale = mr.transform.lossyScale;

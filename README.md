@@ -26,6 +26,11 @@ Solves the two biggest architectural pain points in **Unity 6 PC development**:
   - Inspects all loaded project & package assemblies to classify every `ScriptableRenderPass` as **Native Render Graph (`RecordRenderGraph`)**, **Dual-Path Compatible**, or **Legacy Compatibility Only**.
   - Statically audits C# pass source code (`AnalyzeRenderPassCSharpSource`) for non-static `SetRenderFunc` closure allocations, `AddUnsafePass` overhead, `CommandBufferPool.Get`, and `RenderTexture.GetTemporary` usage inside `RecordRenderGraph`.
 
+- **Headless CI / Batchmode Support (`RenderGraphDoctorCli`)**
+  ```bash
+  unity -batchmode -quit -projectPath . -executeMethod YusufOkuducu.PcRenderGraphDoctor.Editor.RenderGraphDoctorCli.RunCiAudit
+  ```
+
 ---
 
 ## Installation (Unity Package Manager)

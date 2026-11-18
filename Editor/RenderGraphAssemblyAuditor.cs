@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -37,13 +38,14 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
     /// </summary>
     public static class RenderGraphAssemblyAuditor
     {
-        private static readonly Regex BlockCommentRegex = new Regex(@"/\*[\s\S]*?\*/", RegexOptions.Compiled);
-        private static readonly Regex LineCommentRegex = new Regex(@"//.*?$", RegexOptions.Compiled | RegexOptions.Multiline);
         private static readonly Regex RecordRenderGraphRegex = new Regex(@"\bvoid\s+RecordRenderGraph\s*\(", RegexOptions.Compiled);
         private static readonly Regex AddRasterPassRegex = new Regex(@"\.\s*AddRasterRenderPass\s*<", RegexOptions.Compiled);
         private static readonly Regex AddUnsafePassRegex = new Regex(@"\.\s*AddUnsafePass\s*<", RegexOptions.Compiled);
         private static readonly Regex SetRenderFuncLambdaRegex = new Regex(
             @"\.\s*SetRenderFunc\s*(?:<[^>]+>\s*)?\(\s*(static\b)?\s*(?:\([^)]*\)\s*=>|[A-Za-z_]\w*\s*=>|delegate\b)",
+            RegexOptions.Compiled);
+        private static readonly Regex SetRenderFuncMethodGroupRegex = new Regex(
+            @"\.\s*SetRenderFunc\s*(?:<[^>]+>\s*)?\(\s*(?:[A-Za-z_]\w*\s*\.\s*)*([A-Za-z_]\w*)\s*\)",
             RegexOptions.Compiled);
         private static readonly Regex CommandBufferPoolRegex = new Regex(@"\bCommandBufferPool\s*\.\s*Get\b", RegexOptions.Compiled);
         private static readonly Regex GetTemporaryRtRegex = new Regex(@"\bRenderTexture\s*\.\s*GetTemporary\b", RegexOptions.Compiled);
@@ -142,16 +144,23 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
             if (string.IsNullOrWhiteSpace(rawCSharpSource))
                 return res;
 
-            string code = BlockCommentRegex.Replace(rawCSharpSource, " ");
-            code = LineCommentRegex.Replace(code, string.Empty);
+            string uncommentedNoStrings = SanitizeCSharpCommentsAndStrings(rawCSharpSource);
+            string code = StripDisabledPreprocessorBlocks(uncommentedNoStrings);
 
             res.usesRecordRenderGraph = RecordRenderGraphRegex.IsMatch(code);
-            res.usesAddRasterRenderPass = AddRasterPassRegex.IsMatch(code);
-            res.usesAddUnsafePass = AddUnsafePassRegex.IsMatch(code);
-            res.usesLegacyCommandBufferPoolInGraph = res.usesRecordRenderGraph && CommandBufferPoolRegex.IsMatch(code);
-            res.usesLegacyGetTemporaryRtInGraph = res.usesRecordRenderGraph && GetTemporaryRtRegex.IsMatch(code);
 
-            MatchCollection renderFuncs = SetRenderFuncLambdaRegex.Matches(code);
+            // Scope Render Graph checks to the body of RecordRenderGraph so dual-path passes
+            // that also implement legacy Execute() are not falsely flagged for CommandBufferPool/GetTemporary in Execute()
+            string graphScopeCode = res.usesRecordRenderGraph
+                ? ExtractMethodBodies(code, RecordRenderGraphRegex)
+                : code;
+
+            res.usesAddRasterRenderPass = AddRasterPassRegex.IsMatch(graphScopeCode);
+            res.usesAddUnsafePass = AddUnsafePassRegex.IsMatch(graphScopeCode);
+            res.usesLegacyCommandBufferPoolInGraph = res.usesRecordRenderGraph && CommandBufferPoolRegex.IsMatch(graphScopeCode);
+            res.usesLegacyGetTemporaryRtInGraph = res.usesRecordRenderGraph && GetTemporaryRtRegex.IsMatch(graphScopeCode);
+
+            MatchCollection renderFuncs = SetRenderFuncLambdaRegex.Matches(graphScopeCode);
             for (int i = 0; i < renderFuncs.Count; i++)
             {
                 if (renderFuncs[i].Groups[1].Success)
@@ -164,10 +173,30 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
                 }
             }
 
+            MatchCollection methodGroups = SetRenderFuncMethodGroupRegex.Matches(graphScopeCode);
+            for (int i = 0; i < methodGroups.Count; i++)
+            {
+                string methodName = methodGroups[i].Groups[1].Value;
+                if (string.Equals(methodName, "static", StringComparison.Ordinal) ||
+                    string.Equals(methodName, "delegate", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (IsMethodDeclaredStatic(code, methodName))
+                {
+                    res.usesStaticRenderFuncLambda = true;
+                }
+                else
+                {
+                    res.hasNonStaticRenderFuncClosureRisk = true;
+                }
+            }
+
             if (res.hasNonStaticRenderFuncClosureRisk)
             {
                 res.findings.Add(
-                    "GC CLOSURE ALLOCATION RISK: SetRenderFunc lambda is not marked 'static'. Mark the lambda 'static (PassData data, RasterGraphContext ctx) => ...' to prevent per-frame delegate/closure GC allocations.");
+                    "GC CLOSURE ALLOCATION RISK: SetRenderFunc callback is a non-static lambda or instance method group. Use 'static (PassData data, RasterGraphContext ctx) => ...' or a 'static void' method group to prevent per-frame delegate/closure GC allocations.");
             }
 
             if (res.usesAddUnsafePass)
@@ -194,6 +223,245 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
             }
 
             return res;
+        }
+
+        private static bool IsMethodDeclaredStatic(string cleanClassCode, string methodName)
+        {
+            if (string.IsNullOrEmpty(methodName))
+                return false;
+
+            var staticMethodPattern = new Regex(
+                $@"\bstatic\b[^{{;]*?\bvoid\s+{Regex.Escape(methodName)}\s*\(",
+                RegexOptions.Singleline);
+            if (staticMethodPattern.IsMatch(cleanClassCode))
+                return true;
+
+            var instanceMethodPattern = new Regex(
+                $@"\bvoid\s+{Regex.Escape(methodName)}\s*\(",
+                RegexOptions.Singleline);
+            if (instanceMethodPattern.IsMatch(cleanClassCode))
+                return false;
+
+            // External static helper (e.g. SomeClass.ExecutePass) defaults to true if qualified
+            return true;
+        }
+
+        private static string ExtractMethodBodies(string code, Regex methodHeaderRegex)
+        {
+            MatchCollection matches = methodHeaderRegex.Matches(code);
+            if (matches.Count == 0)
+                return code;
+
+            var sb = new StringBuilder();
+            for (int m = 0; m < matches.Count; m++)
+            {
+                int idx = matches[m].Index + matches[m].Length;
+                int parenDepth = 1;
+                while (idx < code.Length && parenDepth > 0)
+                {
+                    char c = code[idx++];
+                    if (c == '(') parenDepth++;
+                    else if (c == ')') parenDepth--;
+                }
+
+                while (idx < code.Length && code[idx] != '{' && code[idx] != ';')
+                    idx++;
+
+                if (idx < code.Length && code[idx] == '{')
+                {
+                    int bodyStart = idx + 1;
+                    int braceDepth = 1;
+                    idx++;
+                    while (idx < code.Length && braceDepth > 0)
+                    {
+                        char c = code[idx++];
+                        if (c == '{') braceDepth++;
+                        else if (c == '}') braceDepth--;
+                    }
+                    int len = Math.Max(0, idx - bodyStart - 1);
+                    sb.AppendLine(code.Substring(bodyStart, len));
+                }
+            }
+
+            return sb.Length > 0 ? sb.ToString() : code;
+        }
+
+        private static string SanitizeCSharpCommentsAndStrings(string rawSource)
+        {
+            if (string.IsNullOrEmpty(rawSource))
+                return string.Empty;
+
+            int len = rawSource.Length;
+            var sb = new StringBuilder(len);
+            int i = 0;
+
+            while (i < len)
+            {
+                char c = rawSource[i];
+
+                // Block comment /* ... */
+                if (c == '/' && i + 1 < len && rawSource[i + 1] == '*')
+                {
+                    sb.Append(' ');
+                    i += 2;
+                    while (i < len)
+                    {
+                        if (rawSource[i] == '*' && i + 1 < len && rawSource[i + 1] == '/')
+                        {
+                            i += 2;
+                            break;
+                        }
+                        if (rawSource[i] == '\n')
+                            sb.Append('\n');
+                        i++;
+                    }
+                    continue;
+                }
+
+                // Line comment // ...
+                if (c == '/' && i + 1 < len && rawSource[i + 1] == '/')
+                {
+                    i += 2;
+                    while (i < len && rawSource[i] != '\n' && rawSource[i] != '\r')
+                        i++;
+                    continue;
+                }
+
+                // Verbatim string literal @"..."
+                if (c == '@' && i + 1 < len && rawSource[i + 1] == '"')
+                {
+                    sb.Append("\"\"");
+                    i += 2;
+                    while (i < len)
+                    {
+                        if (rawSource[i] == '"')
+                        {
+                            if (i + 1 < len && rawSource[i + 1] == '"')
+                            {
+                                i += 2;
+                                continue;
+                            }
+                            i++;
+                            break;
+                        }
+                        if (rawSource[i] == '\n')
+                            sb.Append('\n');
+                        i++;
+                    }
+                    continue;
+                }
+
+                // Regular string literal "..."
+                if (c == '"')
+                {
+                    sb.Append("\"\"");
+                    i++;
+                    while (i < len)
+                    {
+                        char sc = rawSource[i++];
+                        if (sc == '\\' && i < len)
+                        {
+                            i++;
+                        }
+                        else if (sc == '"' || sc == '\n' || sc == '\r')
+                        {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
+                // Character literal '...'
+                if (c == '\'')
+                {
+                    sb.Append("''");
+                    i++;
+                    while (i < len)
+                    {
+                        char cc = rawSource[i++];
+                        if (cc == '\\' && i < len)
+                        {
+                            i++;
+                        }
+                        else if (cc == '\'' || cc == '\n' || cc == '\r')
+                        {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
+                sb.Append(c);
+                i++;
+            }
+
+            return sb.ToString();
+        }
+
+        private static string StripDisabledPreprocessorBlocks(string source)
+        {
+            if (string.IsNullOrEmpty(source))
+                return string.Empty;
+
+            var sb = new StringBuilder(source.Length);
+            var stack = new Stack<(bool parentActive, bool branchActive, bool seenActive)>();
+            bool currentlyActive = true;
+
+            using (var reader = new StringReader(source))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    string trimmed = line.TrimStart();
+                    if (trimmed.StartsWith("#", StringComparison.Ordinal))
+                    {
+                        string directive = trimmed.Substring(1).TrimStart();
+                        if (directive.StartsWith("if", StringComparison.Ordinal) &&
+                            (directive.Length == 2 || char.IsWhiteSpace(directive[2]) || directive[2] == '('))
+                        {
+                            string expr = directive.Substring(2).Trim().Trim('(', ')').Trim();
+                            bool cond = !string.Equals(expr, "0", StringComparison.Ordinal) &&
+                                        !string.Equals(expr, "false", StringComparison.OrdinalIgnoreCase);
+                            bool active = currentlyActive && cond;
+                            stack.Push((currentlyActive, active, active));
+                            currentlyActive = active;
+                            sb.AppendLine();
+                            continue;
+                        }
+                        if (directive.StartsWith("else", StringComparison.Ordinal) &&
+                            (directive.Length == 4 || char.IsWhiteSpace(directive[4])))
+                        {
+                            if (stack.Count > 0)
+                            {
+                                var top = stack.Pop();
+                                bool active = top.parentActive && !top.seenActive;
+                                stack.Push((top.parentActive, active, true));
+                                currentlyActive = active;
+                            }
+                            sb.AppendLine();
+                            continue;
+                        }
+                        if (directive.StartsWith("endif", StringComparison.Ordinal) &&
+                            (directive.Length == 5 || char.IsWhiteSpace(directive[5])))
+                        {
+                            if (stack.Count > 0)
+                            {
+                                var top = stack.Pop();
+                                currentlyActive = top.parentActive;
+                            }
+                            sb.AppendLine();
+                            continue;
+                        }
+                    }
+
+                    if (currentlyActive)
+                        sb.AppendLine(line);
+                    else
+                        sb.AppendLine();
+                }
+            }
+
+            return sb.ToString();
         }
 
         public static string ExportPassFindingsToMarkdown(IReadOnlyList<RenderPassMigrationFinding> findings)

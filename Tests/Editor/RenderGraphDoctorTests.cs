@@ -42,13 +42,22 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Tests
                 mpb.SetColor("_BaseColor", Color.red);
                 mr.SetPropertyBlock(mpb);
 
-                RendererEligibilityRecord rec = GpuResidentDrawerAuditor.AnalyzeRenderer(mr, hasStaticBatchingFlag: true);
+                ResidentDrawerAuditReport report = GpuResidentDrawerAuditor.AuditSceneRenderers(
+                    new[] { mr },
+                    isStaticBatchingEnabledPredicate: _ => true,
+                    isShaderCompatiblePredicate: _ => false);
 
+                Assert.AreEqual(1, report.totalMeshRenderers);
+                Assert.AreEqual(1, report.disqualifiedRenderers);
+                Assert.AreEqual(1, report.shaderIncompatibilityViolations);
+
+                RendererEligibilityRecord rec = report.records[0];
                 Assert.IsFalse(rec.IsEligible);
                 Assert.IsTrue((rec.disqualifiers & ResidentDrawerDisqualifier.HasMaterialPropertyBlock) != 0);
                 Assert.IsTrue((rec.disqualifiers & ResidentDrawerDisqualifier.NegativeTransformScale) != 0);
                 Assert.IsTrue((rec.disqualifiers & ResidentDrawerDisqualifier.StaticBatchingFlagConflict) != 0);
                 Assert.IsTrue((rec.disqualifiers & ResidentDrawerDisqualifier.LightProbeProxyVolumeUsed) != 0);
+                Assert.IsTrue((rec.disqualifiers & ResidentDrawerDisqualifier.ShaderMissingDotsInstancing) != 0);
             }
             finally
             {
@@ -176,6 +185,70 @@ public class CleanRenderGraphPass : ScriptableRenderPass
             Assert.IsTrue(cleanAudit.usesAddRasterRenderPass);
             Assert.IsTrue(cleanAudit.usesStaticRenderFuncLambda);
             Assert.IsFalse(cleanAudit.hasNonStaticRenderFuncClosureRisk);
+        }
+
+        [Test]
+        public void SourceAnalyzer_DoesNotFalselyFlagDualPathExecuteOrStringLiteralsAndHandlesMethodGroups()
+        {
+            const string dualPathAndStaticMethodGroupCSharp = @"
+public class DualPathPass : ScriptableRenderPass
+{
+    public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
+    {
+        var cmd = CommandBufferPool.Get(""Legacy2022Pass"");
+        var temp = RenderTexture.GetTemporary(256, 256);
+    }
+
+    private static void ExecutePassStatic(PassData data, RasterGraphContext ctx)
+    {
+    }
+
+    public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
+    {
+        string note = ""Migrated away from CommandBufferPool.Get and RenderTexture.GetTemporary"";
+        #if false
+        var deadCmd = CommandBufferPool.Get(""Dead"");
+        #endif
+        using (var builder = renderGraph.AddRasterRenderPass<PassData>(""DualPass"", out var passData))
+        {
+            builder.SetRenderFunc<PassData>(ExecutePassStatic);
+        }
+    }
+}";
+
+            const string instanceMethodGroupCSharp = @"
+public class InstanceMethodGroupPass : ScriptableRenderPass
+{
+    private void ExecuteInstance(PassData data, RasterGraphContext ctx)
+    {
+    }
+
+    public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
+    {
+        using (var builder = renderGraph.AddRasterRenderPass<PassData>(""InstancePass"", out var passData))
+        {
+            builder.SetRenderFunc<PassData>(ExecuteInstance);
+        }
+    }
+}";
+
+            RenderGraphSourceAuditResult dualAudit = RenderGraphAssemblyAuditor.AnalyzeRenderPassCSharpSource(
+                dualPathAndStaticMethodGroupCSharp,
+                "Assets/DualPathPass.cs");
+
+            Assert.IsTrue(dualAudit.usesRecordRenderGraph);
+            Assert.IsTrue(dualAudit.usesAddRasterRenderPass);
+            Assert.IsTrue(dualAudit.usesStaticRenderFuncLambda);
+            Assert.IsFalse(dualAudit.hasNonStaticRenderFuncClosureRisk);
+            Assert.IsFalse(dualAudit.usesLegacyCommandBufferPoolInGraph);
+            Assert.IsFalse(dualAudit.usesLegacyGetTemporaryRtInGraph);
+
+            RenderGraphSourceAuditResult instanceGroupAudit = RenderGraphAssemblyAuditor.AnalyzeRenderPassCSharpSource(
+                instanceMethodGroupCSharp,
+                "Assets/InstanceMethodGroupPass.cs");
+
+            Assert.IsTrue(instanceGroupAudit.usesRecordRenderGraph);
+            Assert.IsTrue(instanceGroupAudit.hasNonStaticRenderFuncClosureRisk);
         }
     }
 }

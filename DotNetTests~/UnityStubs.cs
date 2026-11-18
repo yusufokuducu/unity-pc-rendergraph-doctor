@@ -113,6 +113,11 @@ namespace UnityEngine
         public static Color red => new Color();
     }
 
+    public static class Debug
+    {
+        public static void Log(object message) { }
+    }
+
     public sealed class GUIStyle { }
 
     public sealed class GUISkin
