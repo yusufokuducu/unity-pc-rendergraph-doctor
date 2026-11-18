@@ -31,12 +31,38 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
             sb.AppendLine(RenderGraphAssemblyAuditor.ExportPassFindingsToMarkdown(passFindings));
 
             string outPath = Path.Combine(logDir, "RenderGraphDoctorAudit.md");
+            string jsonPath = Path.Combine(logDir, "RenderGraphDoctorMcpReport.json");
             File.WriteAllText(outPath, sb.ToString(), Encoding.UTF8);
+            File.WriteAllText(jsonPath, RenderGraphDoctorMcpBridge.ExportFullMcpReportToJson(sceneReport, passFindings), Encoding.UTF8);
 
             Debug.Log(
                 $"[PcRenderGraphDoctor CI] Audited {sceneReport.totalMeshRenderers} MeshRenderers " +
                 $"({sceneReport.disqualifiedRenderers} disqualified) and {passFindings.Count} ScriptableRenderPass classes. " +
                 $"Report saved to {outPath}");
+        }
+
+        /// <summary>
+        /// MCP / AI Agent batchmode entrypoint outputting structured JSON GPU Resident Drawer & Render Graph diagnostics:
+        /// unity -batchmode -quit -projectPath . -executeMethod YusufOkuducu.PcRenderGraphDoctor.Editor.RenderGraphDoctorCli.RunMcpAuditJson
+        /// </summary>
+        public static string RunMcpAuditJson()
+        {
+            MeshRenderer[] renderers = Object.FindObjectsByType<MeshRenderer>(FindObjectsSortMode.None);
+            ResidentDrawerAuditReport sceneReport = GpuResidentDrawerAuditor.AuditSceneRenderers(
+                renderers,
+                go => GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.BatchingStatic));
+
+            List<RenderPassMigrationFinding> passFindings = RenderGraphAssemblyAuditor.AuditAllLoadedRenderPasses();
+            string json = RenderGraphDoctorMcpBridge.ExportFullMcpReportToJson(sceneReport, passFindings);
+
+            string logDir = Path.Combine(Directory.GetCurrentDirectory(), "Logs");
+            if (!Directory.Exists(logDir))
+                Directory.CreateDirectory(logDir);
+
+            string jsonPath = Path.Combine(logDir, "RenderGraphDoctorMcpReport.json");
+            File.WriteAllText(jsonPath, json, Encoding.UTF8);
+            Debug.Log($"[PcRenderGraphDoctor MCP] Exported structured JSON audit to {jsonPath}");
+            return json;
         }
     }
 }

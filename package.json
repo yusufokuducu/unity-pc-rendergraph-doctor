@@ -1,10 +1,13 @@
 {
   "name": "com.yusufokuducu.pc-rendergraph-doctor",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "displayName": "PC Unity 6 Render Graph & GPU Resident Drawer Doctor",
-  "description": "Audits and auto-fixes Unity 6 PC scenes and assemblies for GPU Resident Drawer (BatchRendererGroup) eligibility, MaterialPropertyBlock instancing breaks, static-batching conflicts, negative-scale winding splits, and legacy ScriptableRenderPass -> RenderGraph migration.",
+  "description": "Audits and auto-fixes Unity 6 PC scenes and assemblies for GPU Resident Drawer (BatchRendererGroup) eligibility, MaterialPropertyBlock instancing breaks, static-batching conflicts, negative-scale winding splits, legacy ScriptableRenderPass -> RenderGraph migration, UI Toolkit heatmaps, and MCP / AI Agent auto-fix bridge.",
   "unity": "2022.3",
   "unityRelease": "0f1",
+  "documentationUrl": "https://github.com/yusufokuducu/unity-pc-rendergraph-doctor#readme",
+  "changelogUrl": "https://github.com/yusufokuducu/unity-pc-rendergraph-doctor/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/yusufokuducu/unity-pc-rendergraph-doctor/blob/main/LICENSE",
   "keywords": [
     "pc",
     "unity6",
@@ -13,6 +16,8 @@
     "batch-renderer-group",
     "srp-batcher",
     "urp",
+    "mcp",
+    "ui-toolkit",
     "diagnostics"
   ],
   "author": {

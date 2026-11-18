@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -249,6 +250,158 @@ public class InstanceMethodGroupPass : ScriptableRenderPass
 
             Assert.IsTrue(instanceGroupAudit.usesRecordRenderGraph);
             Assert.IsTrue(instanceGroupAudit.hasNonStaticRenderFuncClosureRisk);
+        }
+
+        [Test]
+        public void McpBridge_AutoFixSceneRenderers_And_AutoFixRenderPassCSharpSource_ResolveViolations()
+        {
+            var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            try
+            {
+                var mr = go.GetComponent<MeshRenderer>();
+                mr.sharedMaterial.enableInstancing = false;
+                mr.lightProbeUsage = LightProbeUsage.UseProxyVolume;
+                var mpb = new MaterialPropertyBlock();
+                mpb.SetColor("_BaseColor", Color.red);
+                mr.SetPropertyBlock(mpb);
+
+                bool staticBatchFlag = true;
+
+                ResidentDrawerAuditReport beforeScene = GpuResidentDrawerAuditor.AuditSceneRenderers(
+                    new[] { mr },
+                    _ => staticBatchFlag);
+                Assert.AreEqual(1, beforeScene.disqualifiedRenderers);
+
+                SceneAutoFixReport sceneFix = RenderGraphDoctorMcpBridge.AutoFixSceneRenderers(
+                    new[] { mr },
+                    _ => staticBatchFlag,
+                    _ => staticBatchFlag = false);
+
+                Assert.AreEqual(1, sceneFix.renderersFixed);
+                Assert.AreEqual(1, sceneFix.propertyBlocksCleared);
+                Assert.AreEqual(1, sceneFix.materialsInstancingEnabled);
+                Assert.AreEqual(1, sceneFix.lppvConvertedToBlendProbes);
+                Assert.AreEqual(1, sceneFix.staticBatchingFlagsCleared);
+                Assert.IsFalse(mr.HasPropertyBlock());
+                Assert.IsTrue(mr.sharedMaterial.enableInstancing);
+                Assert.AreEqual(LightProbeUsage.BlendProbes, mr.lightProbeUsage);
+                Assert.IsFalse(staticBatchFlag);
+
+                ResidentDrawerAuditReport afterScene = GpuResidentDrawerAuditor.AuditSceneRenderers(
+                    new[] { mr },
+                    _ => staticBatchFlag);
+                Assert.AreEqual(1, afterScene.eligibleRenderers);
+                Assert.AreEqual(0, afterScene.disqualifiedRenderers);
+            }
+            finally
+            {
+                Object.DestroyImmediate(go);
+            }
+
+            // Test C# Render Graph pass non-static SetRenderFunc lambda auto-fix
+            const string nonStaticLambdaPass = @"
+public class ClosurePass : ScriptableRenderPass
+{
+    public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
+    {
+        using (var builder = renderGraph.AddRasterRenderPass<PassData>(""ClosurePass"", out var passData))
+        {
+            builder.SetRenderFunc((PassData data, RasterGraphContext ctx) =>
+            {
+            });
+        }
+    }
+}";
+
+            RenderPassSourceAutoFixReport passFix = RenderGraphDoctorMcpBridge.AutoFixRenderPassCSharpSource(
+                nonStaticLambdaPass,
+                "Assets/ClosurePass.cs");
+
+            Assert.IsTrue(passFix.modified);
+            Assert.IsTrue(passFix.beforeAudit.hasNonStaticRenderFuncClosureRisk);
+            Assert.IsFalse(passFix.afterAudit.hasNonStaticRenderFuncClosureRisk);
+            Assert.IsTrue(passFix.afterAudit.usesStaticRenderFuncLambda);
+            StringAssert.Contains("SetRenderFunc(static (PassData data, RasterGraphContext ctx) =>", passFix.patchedSource);
+        }
+
+        [Test]
+        public void McpBridge_HandlesJsonRpcInitializeToolsListToolsCallAndErrors()
+        {
+            string initRes = RenderGraphDoctorMcpBridge.HandleJsonRpcRequest(
+                @"{""jsonrpc"":""2.0"",""id"":1,""method"":""initialize""}");
+            StringAssert.Contains(@"""protocolVersion"":""2024-11-05""", initRes);
+            StringAssert.Contains(@"""name"":""unity-pc-rendergraph-doctor""", initRes);
+
+            string listRes = RenderGraphDoctorMcpBridge.HandleJsonRpcRequest(
+                @"{""jsonrpc"":""2.0"",""id"":2,""method"":""tools/list""}");
+            StringAssert.Contains("rendergraph_doctor.audit_scene_renderers", listRes);
+            StringAssert.Contains("rendergraph_doctor.autofix_renderpass_csharp", listRes);
+
+            string callBrg = RenderGraphDoctorMcpBridge.HandleJsonRpcRequest(
+                @"{""jsonrpc"":""2.0"",""id"":3,""method"":""tools/call"",""params"":{""name"":""rendergraph_doctor.audit_shader_brg"",""arguments"":{""source"":""Shader \""Custom/BrgOk\"" { SubShader { Pass { HLSLPROGRAM\n#pragma target 4.5\n#pragma multi_compile _ DOTS_INSTANCING_ON\nCBUFFER_START(UnityPerMaterial) float4 _C; CBUFFER_END ENDHLSL } } }""}}}");
+            StringAssert.Contains(@"""isCompatibleWithResidentDrawer"":true", callBrg);
+            StringAssert.Contains(@"""isError"":false", callBrg);
+
+            string callFixPass = RenderGraphDoctorMcpBridge.HandleJsonRpcRequest(
+                @"{""jsonrpc"":""2.0"",""id"":4,""method"":""tools/call"",""params"":{""name"":""rendergraph_doctor.autofix_renderpass_csharp"",""arguments"":{""source"":""public class P : ScriptableRenderPass { public override void RecordRenderGraph(RenderGraph rg, ContextContainer fd) { using (var b = rg.AddRasterRenderPass<D>(\""P\"", out var d)) { b.SetRenderFunc((D data, RasterGraphContext ctx) => {}); } } }""}}}");
+            StringAssert.Contains(@"""modified"":true", callFixPass);
+            StringAssert.Contains(@"""hasClosureRiskAfter"":false", callFixPass);
+
+            string errUnknown = RenderGraphDoctorMcpBridge.HandleJsonRpcRequest(
+                @"{""jsonrpc"":""2.0"",""id"":99,""method"":""nonexistent""}");
+            StringAssert.Contains("-32601", errUnknown);
+        }
+
+        [Test]
+        public void UiToolkitWindow_BuildsHeatmapSwitchesTabsAndFiltersSceneAndPassRecords()
+        {
+            var goGood = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            goGood.name = "EligibleProp";
+            var goBad = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            goBad.name = "BrokenRock";
+
+            try
+            {
+                var mrGood = goGood.GetComponent<MeshRenderer>();
+                var mrBad = goBad.GetComponent<MeshRenderer>();
+                mrBad.sharedMaterial.enableInstancing = false;
+
+                ResidentDrawerAuditReport sceneReport = GpuResidentDrawerAuditor.AuditSceneRenderers(new[] { mrGood, mrBad });
+                var passes = new List<RenderPassMigrationFinding>
+                {
+                    RenderGraphAssemblyAuditor.AnalyzeRenderPassType(typeof(NativeUnity6BloomPass)),
+                    RenderGraphAssemblyAuditor.AnalyzeRenderPassType(typeof(LegacyCustomOutlinePass))
+                };
+
+                var win = new RenderGraphDoctorWindow();
+                win.CreateGUI();
+                Assert.Greater(win.rootVisualElement.childCount, 0);
+
+                win.SetCustomAuditData(sceneReport, passes);
+
+                ResidentDrawerHeatmapSummary heatmap = RenderGraphDoctorMcpBridge.ComputeHeatmapSummary(sceneReport, passes);
+                Assert.AreEqual(2, heatmap.totalRenderers);
+                Assert.AreEqual(1, heatmap.eligibleRenderers);
+                Assert.AreEqual(1, heatmap.disqualifiedRenderers);
+                Assert.AreEqual(0.5f, heatmap.eligibilityRatio, 0.001f);
+                Assert.AreEqual(2, heatmap.totalRenderPasses);
+                Assert.AreEqual(0.5f, heatmap.renderGraphMigrationRatio, 0.001f);
+
+                // Tab 0: Disqualified scene renderers
+                Assert.AreEqual(1, win.GetFilteredSceneRecords().Count);
+                Assert.AreEqual("BrokenRock", win.GetFilteredSceneRecords()[0].gameObjectName);
+
+                // Tab 1: RenderPass findings with search filter
+                win.SetSelectedTab(1);
+                Assert.AreEqual(2, win.GetFilteredPassFindings().Count);
+                win.SetSearchFilter("NativeUnity6BloomPass");
+                Assert.AreEqual(1, win.GetFilteredPassFindings().Count);
+            }
+            finally
+            {
+                Object.DestroyImmediate(goGood);
+                Object.DestroyImmediate(goBad);
+            }
         }
     }
 }
