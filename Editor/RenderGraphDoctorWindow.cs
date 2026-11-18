@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.IO;
+using System.Text;
 using UnityEditor;
 using UnityEngine;
 
@@ -26,7 +28,7 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
             EditorGUILayout.Space(6f);
             EditorGUILayout.LabelField("PC Unity 6 Render Graph & GPU Resident Drawer Doctor", EditorStyles.boldLabel);
             EditorGUILayout.HelpBox(
-                "Audits scene MeshRenderers for GPU Resident Drawer (BatchRendererGroup) disqualifiers and inspects all compiled ScriptableRenderPass classes for Unity 6 RecordRenderGraph compliance.",
+                "Audits scene MeshRenderers and custom shaders for GPU Resident Drawer (BatchRendererGroup) disqualifiers and inspects compiled ScriptableRenderPass classes for Unity 6 RecordRenderGraph compliance.",
                 MessageType.Info);
 
             _selectedTab = GUILayout.Toolbar(_selectedTab, Tabs, GUILayout.Height(26f));
@@ -51,6 +53,11 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
                 AutoFixSceneRenderers();
                 RunSceneAudit();
             }
+
+            if (GUILayout.Button("Export Markdown Report", GUILayout.Height(28f)))
+            {
+                ExportSceneMarkdown();
+            }
             EditorGUILayout.EndHorizontal();
 
             if (_sceneReport == null) return;
@@ -66,7 +73,8 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
                 $"MaterialPropertyBlock Breaks: {_sceneReport.propertyBlockViolations} | " +
                 $"Instancing Off: {_sceneReport.instancingDisabledViolations} | " +
                 $"StaticBatch Conflicts: {_sceneReport.staticBatchingConflicts} | " +
-                $"Negative Scale: {_sceneReport.negativeScaleViolations}");
+                $"Negative Scale: {_sceneReport.negativeScaleViolations} | " +
+                $"LPPV Used: {_sceneReport.lppvViolations}");
 
             _scrollScene = EditorGUILayout.BeginScrollView(_scrollScene);
             for (int i = 0; i < _sceneReport.records.Count; i++)
@@ -93,10 +101,24 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
 
         private void DrawRenderGraphPassesTab()
         {
+            EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button("Scan Compiled Assemblies for ScriptableRenderPass", GUILayout.Height(28f)))
             {
                 _passFindings = RenderGraphAssemblyAuditor.AuditAllLoadedRenderPasses();
             }
+
+            if (GUILayout.Button("Export Pass Audit Markdown", GUILayout.Height(28f)))
+            {
+                if (_passFindings == null)
+                    _passFindings = RenderGraphAssemblyAuditor.AuditAllLoadedRenderPasses();
+                string path = EditorUtility.SaveFilePanel("Export RenderPass Audit", "", "RenderGraphPassAudit.md", "md");
+                if (!string.IsNullOrEmpty(path))
+                {
+                    File.WriteAllText(path, RenderGraphAssemblyAuditor.ExportPassFindingsToMarkdown(_passFindings), Encoding.UTF8);
+                    EditorUtility.RevealInFinder(path);
+                }
+            }
+            EditorGUILayout.EndHorizontal();
 
             if (_passFindings == null) return;
 
@@ -122,6 +144,19 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
             _sceneReport = GpuResidentDrawerAuditor.AuditSceneRenderers(
                 renderers,
                 go => GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.BatchingStatic));
+        }
+
+        private void ExportSceneMarkdown()
+        {
+            if (_sceneReport == null)
+                RunSceneAudit();
+
+            string path = EditorUtility.SaveFilePanel("Export Resident Drawer Scene Report", "", "ResidentDrawerReport.md", "md");
+            if (!string.IsNullOrEmpty(path))
+            {
+                File.WriteAllText(path, _sceneReport.ExportToMarkdown(), Encoding.UTF8);
+                EditorUtility.RevealInFinder(path);
+            }
         }
 
         private static void AutoFixSceneRenderers()
