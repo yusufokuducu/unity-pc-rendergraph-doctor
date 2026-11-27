@@ -465,7 +465,7 @@ public class UnsafeThisCallPass : ScriptableRenderPass
         }
 
         [Test]
-        public async Task McpBridge_And_LiveLoopbackServer_EnforceNotificationsSecurityAndPathTraversal()
+        public void McpBridge_And_LiveLoopbackServer_EnforceNotificationsSecurityAndPathTraversal()
         {
             string initRes = RenderGraphDoctorMcpBridge.HandleJsonRpcRequest(
                 @"{""jsonrpc"":""2.0"",""id"":1,""method"":""initialize""}");
@@ -486,37 +486,40 @@ public class UnsafeThisCallPass : ScriptableRenderPass
                 @"{""jsonrpc"":""2.0"",""id"":4,""method"":""tools/call"",""params"":{""name"":""rendergraph_doctor.audit_project_prefabs"",""arguments"":{""rootDirectory"":""../../Windows""}}}");
             StringAssert.Contains("-32602", traversalRes);
 
-            using (var server = new RenderGraphDoctorMcpLiveServer(dispatchDirectlyOnBackgroundThreadForTests: true))
+            Task.Run(async () =>
             {
-                server.Start(0, "rgd-secret-token");
-                using (var http = new HttpClient())
+                using (var server = new RenderGraphDoctorMcpLiveServer(dispatchDirectlyOnBackgroundThreadForTests: true))
                 {
-                    var unauth = await http.PostAsync(
-                        server.EndpointUrl,
-                        new StringContent(@"{""jsonrpc"":""2.0"",""id"":1,""method"":""ping""}", Encoding.UTF8, "application/json"));
-                    Assert.AreEqual(HttpStatusCode.Unauthorized, unauth.StatusCode);
-
-                    var badOrigin = new HttpRequestMessage(HttpMethod.Post, server.EndpointUrl)
+                    server.Start(0, "rgd-secret-token");
+                    using (var http = new HttpClient())
                     {
-                        Content = new StringContent(@"{""jsonrpc"":""2.0"",""id"":1,""method"":""ping""}", Encoding.UTF8, "application/json")
-                    };
-                    badOrigin.Headers.Add("Authorization", "Bearer rgd-secret-token");
-                    badOrigin.Headers.Add("Origin", "https://evil.example.org");
-                    var badResp = await http.SendAsync(badOrigin);
-                    Assert.AreEqual(HttpStatusCode.Forbidden, badResp.StatusCode);
+                        var unauth = await http.PostAsync(
+                            server.EndpointUrl,
+                            new StringContent(@"{""jsonrpc"":""2.0"",""id"":1,""method"":""ping""}", Encoding.UTF8, "application/json"));
+                        Assert.AreEqual(HttpStatusCode.Unauthorized, unauth.StatusCode);
 
-                    var okReq = new HttpRequestMessage(HttpMethod.Post, server.EndpointUrl)
-                    {
-                        Content = new StringContent(@"{""jsonrpc"":""2.0"",""id"":5,""method"":""tools/list""}", Encoding.UTF8, "application/json")
-                    };
-                    okReq.Headers.Add("Authorization", "Bearer rgd-secret-token");
-                    var okResp = await http.SendAsync(okReq);
-                    Assert.AreEqual(HttpStatusCode.OK, okResp.StatusCode);
-                    string body = await okResp.Content.ReadAsStringAsync();
-                    StringAssert.Contains("rendergraph_doctor.autoconfigure_pipeline_prerequisites", body);
-                    StringAssert.Contains("rendergraph_doctor.audit_project_prefabs", body);
+                        var badOrigin = new HttpRequestMessage(HttpMethod.Post, server.EndpointUrl)
+                        {
+                            Content = new StringContent(@"{""jsonrpc"":""2.0"",""id"":1,""method"":""ping""}", Encoding.UTF8, "application/json")
+                        };
+                        badOrigin.Headers.Add("Authorization", "Bearer rgd-secret-token");
+                        badOrigin.Headers.Add("Origin", "https://evil.example.org");
+                        var badResp = await http.SendAsync(badOrigin);
+                        Assert.AreEqual(HttpStatusCode.Forbidden, badResp.StatusCode);
+
+                        var okReq = new HttpRequestMessage(HttpMethod.Post, server.EndpointUrl)
+                        {
+                            Content = new StringContent(@"{""jsonrpc"":""2.0"",""id"":5,""method"":""tools/list""}", Encoding.UTF8, "application/json")
+                        };
+                        okReq.Headers.Add("Authorization", "Bearer rgd-secret-token");
+                        var okResp = await http.SendAsync(okReq);
+                        Assert.AreEqual(HttpStatusCode.OK, okResp.StatusCode);
+                        string body = await okResp.Content.ReadAsStringAsync();
+                        StringAssert.Contains("rendergraph_doctor.autoconfigure_pipeline_prerequisites", body);
+                        StringAssert.Contains("rendergraph_doctor.audit_project_prefabs", body);
+                    }
                 }
-            }
+            }).GetAwaiter().GetResult();
         }
 
         [Test]
