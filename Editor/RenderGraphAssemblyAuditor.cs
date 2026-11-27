@@ -442,10 +442,34 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
             }
         }
 
+        private static readonly Regex ScriptableRenderPassClassRegex = new Regex(
+            @"\bclass\s+[A-Za-z_]\w*\s*:[^{]*\bScriptableRenderPass\b",
+            RegexOptions.Compiled);
+        private static readonly Regex AddRenderGraphPassCallRegex = new Regex(
+            @"\.\s*Add(?:RasterRender|Unsafe|Compute)Pass\s*<",
+            RegexOptions.Compiled);
+
         private static void EvaluateRule1MaterialBinding(string fullCode, string graphScopeCode, RenderGraphSourceAuditResult res)
         {
-            string withoutPassData = PassDataClassRegex.Replace(fullCode, string.Empty);
-            MatchCollection matDecls = DeclaredMaterialFieldRegex.Matches(withoutPassData);
+            // Scope Material field discovery to ScriptableRenderPass class body (excluding outer
+            // ScriptableRendererFeature serialized material fields that are forwarded via Setup(),
+            // and excluding nested PassData classes and method bodies).
+            List<string> passClassBodies = ExtractRenderPassClassBodies(fullCode);
+            string searchScope;
+            if (passClassBodies.Count > 0)
+            {
+                var sb = new StringBuilder();
+                for (int i = 0; i < passClassBodies.Count; i++)
+                    sb.AppendLine(StripBracedNestedBlocks(passClassBodies[i]));
+                searchScope = sb.ToString();
+            }
+            else
+            {
+                string withoutPassData = PassDataClassRegex.Replace(fullCode, string.Empty);
+                searchScope = withoutPassData;
+            }
+
+            MatchCollection matDecls = DeclaredMaterialFieldRegex.Matches(searchScope);
             for (int i = 0; i < matDecls.Count; i++)
             {
                 string matField = matDecls[i].Groups[1].Value;
@@ -460,22 +484,143 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
 
         private static void EvaluateRule2SimultaneousReadWrite(string graphScopeCode, RenderGraphSourceAuditResult res)
         {
-            var readHandles = new HashSet<string>(StringComparer.Ordinal);
-            MatchCollection reads = UseTextureCallRegex.Matches(graphScopeCode);
-            for (int i = 0; i < reads.Count; i++)
-                readHandles.Add(reads[i].Groups[1].Value.Trim());
-
-            if (readHandles.Count == 0) return;
-
-            MatchCollection writes = SetRenderAttachmentCallRegex.Matches(graphScopeCode);
-            for (int i = 0; i < writes.Count; i++)
+            List<string> passScopes = ExtractIndividualRenderPassScopes(graphScopeCode);
+            for (int p = 0; p < passScopes.Count; p++)
             {
-                if (readHandles.Contains(writes[i].Groups[1].Value.Trim()))
+                string scope = passScopes[p];
+                var readHandles = new HashSet<string>(StringComparer.Ordinal);
+                MatchCollection reads = UseTextureCallRegex.Matches(scope);
+                for (int i = 0; i < reads.Count; i++)
+                    readHandles.Add(reads[i].Groups[1].Value.Trim());
+
+                if (readHandles.Count == 0)
+                    continue;
+
+                MatchCollection writes = SetRenderAttachmentCallRegex.Matches(scope);
+                for (int i = 0; i < writes.Count; i++)
                 {
-                    res.hasSimultaneousReadWriteTextureHazard = true;
-                    return;
+                    if (readHandles.Contains(writes[i].Groups[1].Value.Trim()))
+                    {
+                        res.hasSimultaneousReadWriteTextureHazard = true;
+                        return;
+                    }
                 }
             }
+        }
+
+        private static List<string> ExtractRenderPassClassBodies(string code)
+        {
+            var bodies = new List<string>();
+            if (string.IsNullOrEmpty(code))
+                return bodies;
+
+            MatchCollection matches = ScriptableRenderPassClassRegex.Matches(code);
+            for (int i = 0; i < matches.Count; i++)
+            {
+                int braceOpen = code.IndexOf('{', matches[i].Index + matches[i].Length);
+                if (braceOpen < 0) continue;
+
+                int depth = 1;
+                int idx = braceOpen + 1;
+                while (idx < code.Length && depth > 0)
+                {
+                    char c = code[idx++];
+                    if (c == '{') depth++;
+                    else if (c == '}') depth--;
+                }
+
+                if (depth == 0)
+                    bodies.Add(code.Substring(braceOpen + 1, Math.Max(0, idx - braceOpen - 2)));
+            }
+            return bodies;
+        }
+
+        private static string StripBracedNestedBlocks(string classBody)
+        {
+            if (string.IsNullOrEmpty(classBody))
+                return string.Empty;
+
+            var sb = new StringBuilder(classBody.Length);
+            int depth = 0;
+            for (int i = 0; i < classBody.Length; i++)
+            {
+                char c = classBody[i];
+                if (c == '{')
+                {
+                    depth++;
+                }
+                else if (c == '}')
+                {
+                    if (depth > 0) depth--;
+                }
+                else if (depth == 0)
+                {
+                    sb.Append(c);
+                }
+            }
+            return sb.ToString();
+        }
+
+        private static List<string> ExtractIndividualRenderPassScopes(string graphScopeCode)
+        {
+            var scopes = new List<string>();
+            if (string.IsNullOrEmpty(graphScopeCode))
+                return scopes;
+
+            MatchCollection passCalls = AddRenderGraphPassCallRegex.Matches(graphScopeCode);
+            if (passCalls.Count == 0)
+            {
+                scopes.Add(graphScopeCode);
+                return scopes;
+            }
+
+            for (int i = 0; i < passCalls.Count; i++)
+            {
+                int callStart = passCalls[i].Index;
+                int nextCallStart = (i + 1 < passCalls.Count) ? passCalls[i + 1].Index : graphScopeCode.Length;
+
+                // Look backwards on the same statement for `using (` to locate a braced pass scope `using (...) { ... }`
+                int stmtStart = graphScopeCode.LastIndexOfAny(new[] { ';', '{', '}' }, callStart);
+                stmtStart = stmtStart < 0 ? 0 : stmtStart + 1;
+                string prefix = graphScopeCode.Substring(stmtStart, callStart - stmtStart);
+                Match usingParen = Regex.Match(prefix, @"\busing\s*\(");
+
+                if (usingParen.Success)
+                {
+                    int parenOpen = stmtStart + usingParen.Index + usingParen.Length - 1;
+                    int pDepth = 1;
+                    int idx = parenOpen + 1;
+                    while (idx < graphScopeCode.Length && pDepth > 0)
+                    {
+                        char c = graphScopeCode[idx++];
+                        if (c == '(') pDepth++;
+                        else if (c == ')') pDepth--;
+                    }
+
+                    while (idx < graphScopeCode.Length && char.IsWhiteSpace(graphScopeCode[idx]))
+                        idx++;
+
+                    if (idx < graphScopeCode.Length && graphScopeCode[idx] == '{')
+                    {
+                        int bStart = idx + 1;
+                        int bDepth = 1;
+                        idx++;
+                        while (idx < graphScopeCode.Length && bDepth > 0)
+                        {
+                            char c = graphScopeCode[idx++];
+                            if (c == '{') bDepth++;
+                            else if (c == '}') bDepth--;
+                        }
+                        scopes.Add(graphScopeCode.Substring(bStart, Math.Max(0, idx - bStart - 1)));
+                        continue;
+                    }
+                }
+
+                // Fallback for C# 8 brace-less `using var builder = renderGraph.Add*Pass<...>(...);`
+                scopes.Add(graphScopeCode.Substring(callStart, Math.Max(0, nextCallStart - callStart)));
+            }
+
+            return scopes;
         }
 
         private static void EvaluateRule3PooledPassDataHandles(

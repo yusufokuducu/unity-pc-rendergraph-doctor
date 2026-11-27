@@ -596,5 +596,71 @@ public class UnsafeThisCallPass : ScriptableRenderPass
                 UnityEngine.Object.DestroyImmediate(goBad);
             }
         }
+
+        [Test]
+        public void MultiPassRendererFeatureWithNestedPass_DoesNotFalseFlagRule1OrRule2()
+        {
+            const string multiPassFeatureSource = @"
+public class MultiPassOutlineFeature : ScriptableRendererFeature
+{
+    [SerializeField] private Material normalsMaterial;
+    [SerializeField] private Material compositeMaterial;
+    private OutlinePass _pass;
+
+    public override void Create() { _pass = new OutlinePass(); }
+    public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData data)
+    {
+        _pass.Setup(normalsMaterial, compositeMaterial);
+        renderer.EnqueuePass(_pass);
+    }
+
+    private class OutlinePass : ScriptableRenderPass
+    {
+        private Material _normals;
+        private Material _composite;
+        public void Setup(Material n, Material c) { _normals = n; _composite = c; }
+
+        private class NormalsPassData { public Material mat; }
+        private class CompositePassData { public TextureHandle src; public Material mat; }
+
+        public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
+        {
+            var resources = frameData.Get<UniversalResourceData>();
+            var desc = resources.activeColorTexture.GetDescriptor(renderGraph);
+            TextureHandle normals = renderGraph.CreateTexture(desc);
+
+            using (var builder = renderGraph.AddRasterRenderPass<NormalsPassData>(""Normals"", out var data))
+            {
+                data.mat = _normals;
+                builder.SetRenderAttachment(normals, 0);
+                builder.SetRenderFunc(static (NormalsPassData d, RasterGraphContext ctx) => { });
+            }
+
+            using (var builder = renderGraph.AddRasterRenderPass<CompositePassData>(""Composite"", out var data))
+            {
+                data.src = normals;
+                data.mat = _composite;
+                builder.UseTexture(normals);
+                builder.SetRenderAttachment(resources.activeColorTexture, 0);
+                builder.SetRenderFunc(static (CompositePassData d, RasterGraphContext ctx) =>
+                {
+                    Blitter.BlitTexture(ctx.cmd, d.src, new Vector4(1, 1, 0, 0), d.mat, 0);
+                });
+            }
+        }
+    }
+}";
+
+            RenderGraphSourceAuditResult audit = RenderGraphAssemblyAuditor.AnalyzeRenderPassCSharpSource(
+                multiPassFeatureSource,
+                "Assets/MultiPassOutlineFeature.cs");
+
+            Assert.IsFalse(audit.hasUnusedOrUnboundMaterialHazard,
+                "Rule 1 must not false-flag ScriptableRendererFeature serialized Materials passed into nested ScriptableRenderPass.Setup().");
+            Assert.IsFalse(audit.hasSimultaneousReadWriteTextureHazard,
+                "Rule 2 must scope read/write checks per pass so Pass 1 writing 'normals' and Pass 2 reading 'normals' is valid.");
+            Assert.IsFalse(audit.hasNonStaticRenderFuncClosureRisk);
+            Assert.IsFalse(audit.hasManualTextureDescHazard);
+        }
     }
 }

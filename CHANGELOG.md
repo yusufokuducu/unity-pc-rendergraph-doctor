@@ -8,6 +8,7 @@ All notable changes to `com.yusufokuducu.pc-rendergraph-doctor` are documented i
 - **Unity `6000.6.0f1` & `com.unity.pipeline` `0.8.0-exp.1` Verification**:
   - Pinned `versionDefines` to `com.unity.pipeline` `0.8.0-exp.1`, referenced `Unity.Pipeline.Attributes`, and fixed `[CliCommand]` attributes to the 2-argument signature with `Tags` (`rendergraph_doctor_audit`, `rendergraph_doctor_configure_pipeline`, `rendergraph_doctor_autofix_scene`, `rendergraph_doctor_audit_prefabs`).
   - Excluded `*.Tests` assemblies and non-`UnityEngine.Rendering` mock `ScriptableRenderPass` base classes from `RenderGraphAssemblyAuditor.AuditAllLoadedRenderPasses()` so adding the package to `manifest.json` `testables` cannot false-fail CI quality gates with unit-test fixture passes.
+  - Fixed two real-world static analyzer false positives in `RenderGraphAssemblyAuditor.AnalyzeRenderPassCSharpSource`: scoped Rule 2 (`UseTexture` vs `SetRenderAttachment`) per individual RenderGraph pass (`AddRasterRenderPass`/`AddUnsafePass`/`AddComputePass`) instead of across all passes in `RecordRenderGraph`, and scoped Rule 1 (`Material` binding) to `ScriptableRenderPass` class fields so outer `ScriptableRendererFeature` serialized `Material` fields passed via `Setup()` are not false-flagged.
   - Added missing `#pragma vertex` / `#pragma fragment` directives to EditMode `DOTS_INSTANCING_ON` test shaders so real Unity 6000.6 compiles them and populates `shader.keywordSpace`.
 
 ## [2.0.0] - 2026-11-26
