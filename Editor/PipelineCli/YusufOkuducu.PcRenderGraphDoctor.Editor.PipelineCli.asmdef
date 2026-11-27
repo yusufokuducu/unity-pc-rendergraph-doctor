@@ -4,7 +4,8 @@
     "references": [
         "YusufOkuducu.PcRenderGraphDoctor.Runtime",
         "YusufOkuducu.PcRenderGraphDoctor.Editor",
-        "Unity.Pipeline"
+        "Unity.Pipeline",
+        "Unity.Pipeline.Attributes"
     ],
     "includePlatforms": [
         "Editor"
@@ -20,7 +21,7 @@
     "versionDefines": [
         {
             "name": "com.unity.pipeline",
-            "expression": "0.0.1",
+            "expression": "0.8.0-exp.1",
             "define": "YUSUF_UNITY_PIPELINE_CLI"
         }
     ],
