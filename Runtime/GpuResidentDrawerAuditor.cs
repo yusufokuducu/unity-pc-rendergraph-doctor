@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
@@ -19,7 +20,10 @@ namespace YusufOkuducu.PcRenderGraphDoctor
         TransparentOrNonOpaqueQueue = 1 << 5,
         HighPolyOverdrawRiskWithoutLOD = 1 << 6,
         LightProbeProxyVolumeUsed = 1 << 7,
-        ShaderMissingDotsInstancing = 1 << 8
+        ShaderMissingDotsInstancing = 1 << 8,
+        BlendProbesWithAnchorUnsupported = 1 << 9,
+        CustomVertexStreamsUsed = 1 << 10,
+        LodAnimatedCrossFadeConflict = 1 << 11
     }
 
     [Serializable]
@@ -39,9 +43,16 @@ namespace YusufOkuducu.PcRenderGraphDoctor
     public struct RendererEligibilityRecord
     {
         public string gameObjectName;
+        public string assetOrScenePath;
+        public GameObject targetGameObject;
+#if UNITY_6000_4_OR_NEWER
+        public EntityId entityId;
+#else
         public int instanceId;
+#endif
         public string materialName;
         public string shaderName;
+        public int subMeshCount;
         public int triangleCount;
         public ResidentDrawerDisqualifier disqualifiers;
         public string recommendation;
@@ -60,6 +71,9 @@ namespace YusufOkuducu.PcRenderGraphDoctor
         public int negativeScaleViolations;
         public int staticBatchingConflicts;
         public int lppvViolations;
+        public int probeAnchorViolations;
+        public int customVertexStreamViolations;
+        public int lodCrossFadeViolations;
         public int shaderIncompatibilityViolations;
         public int desktopOverdrawRiskMeshes;
         public List<RendererEligibilityRecord> records = new List<RendererEligibilityRecord>();
@@ -67,21 +81,23 @@ namespace YusufOkuducu.PcRenderGraphDoctor
         public string ExportToMarkdown()
         {
             var sb = new StringBuilder();
-            sb.AppendLine("# Unity 6 GPU Resident Drawer — Scene Eligibility Report");
+            sb.AppendLine("# Unity 6 GPU Resident Drawer — Scene & Prefab Eligibility Report");
             sb.AppendLine();
             sb.AppendLine($"- **Total MeshRenderers**: {totalMeshRenderers}");
             sb.AppendLine($"- **Eligible**: {eligibleRenderers} | **Disqualified**: {disqualifiedRenderers}");
             sb.AppendLine($"- **MaterialPropertyBlock Breaks**: {propertyBlockViolations} | **Instancing Disabled**: {instancingDisabledViolations}");
-            sb.AppendLine($"- **StaticBatching Conflicts**: {staticBatchingConflicts} | **Negative Scale**: {negativeScaleViolations} | **LPPV Used**: {lppvViolations} | **Shader Missing DOTS Instancing**: {shaderIncompatibilityViolations}");
+            sb.AppendLine($"- **StaticBatching Conflicts**: {staticBatchingConflicts} | **Negative Scale**: {negativeScaleViolations} | **LPPV Used**: {lppvViolations}");
+            sb.AppendLine($"- **ProbeAnchor w/ BlendProbes**: {probeAnchorViolations} | **Custom Vertex Streams**: {customVertexStreamViolations} | **Animated LOD CrossFade**: {lodCrossFadeViolations}");
+            sb.AppendLine($"- **Shader Missing DOTS_INSTANCING_ON**: {shaderIncompatibilityViolations} | **High-Poly Overdraw Risk**: {desktopOverdrawRiskMeshes}");
             sb.AppendLine();
-            sb.AppendLine("| GameObject | Triangles | Material (Shader) | Disqualifiers | Recommendation |");
+            sb.AppendLine("| GameObject | SubMeshes / Tris | Material (Shader) | Disqualifiers | Recommendation |");
             sb.AppendLine("|---|---:|---|---|---|");
 
             for (int i = 0; i < records.Count; i++)
             {
                 RendererEligibilityRecord r = records[i];
                 sb.Append("| `").Append(r.gameObjectName).Append("` | ")
-                  .Append(r.triangleCount).Append(" | `")
+                  .Append(Math.Max(1, r.subMeshCount)).Append(" / ").Append(r.triangleCount).Append(" | `")
                   .Append(r.materialName).Append("` (`").Append(r.shaderName).Append("`) | `")
                   .Append(r.disqualifiers).Append("` | ")
                   .Append(r.recommendation).AppendLine(" |");
@@ -92,27 +108,36 @@ namespace YusufOkuducu.PcRenderGraphDoctor
     }
 
     /// <summary>
-    /// Audits MeshRenderers and Shader source code in PC scenes for Unity 6 GPU Resident Drawer
-    /// (BatchRendererGroup / Compute Indirect) and SRP Batcher eligibility, detecting hidden disqualifiers
-    /// and desktop GPU quad overdraw traps.
+    /// Audits MeshRenderers (across all sub-meshes and Unity 6 GRDExclusionReason rules) and Shader assets/sources
+    /// for Unity 6 GPU Resident Drawer (BatchRendererGroup / Compute Indirect) and SRP Batcher eligibility.
     /// </summary>
     public static class GpuResidentDrawerAuditor
     {
         private static readonly Regex ShaderNameRegex = new Regex(@"Shader\s+""([^""]+)""", RegexOptions.Compiled);
         private static readonly Regex Target45PlusRegex = new Regex(@"^\s*#pragma\s+target\s+(?:4\.5|4\.6|5\.0)\b", RegexOptions.Compiled | RegexOptions.Multiline);
-        private static readonly Regex DotsInstancingPragmaRegex = new Regex(@"^\s*#pragma\s+multi_compile(?:_local)?\b[^\r\n]*\bDOTS_INSTANCING_ON\b", RegexOptions.Compiled | RegexOptions.Multiline);
+        private static readonly Regex DotsInstancingPragmaRegex = new Regex(@"^\s*#pragma\s+multi_compile(?:_local|_vertex|_fragment)?\b[^\r\n]*\bDOTS_INSTANCING_ON\b", RegexOptions.Compiled | RegexOptions.Multiline);
         private static readonly Regex CBufferPerMaterialRegex = new Regex(@"CBUFFER_START\s*\(\s*UnityPerMaterial\s*\)", RegexOptions.Compiled);
         private static readonly Regex DotsInstancedPropRegex = new Regex(@"\bUNITY_DOTS_INSTANCED_PROP\b", RegexOptions.Compiled);
-        private static readonly Regex BlockCommentRegex = new Regex(@"/\*[\s\S]*?\*/", RegexOptions.Compiled);
-        private static readonly Regex LineCommentRegex = new Regex(@"//.*?$", RegexOptions.Compiled | RegexOptions.Multiline);
+
+        public static MeshRenderer[] FindAllActiveMeshRenderers()
+        {
+#if UNITY_6000_4_OR_NEWER
+            return UnityEngine.Object.FindObjectsByType<MeshRenderer>();
+#else
+            return UnityEngine.Object.FindObjectsByType<MeshRenderer>(FindObjectsSortMode.None);
+#endif
+        }
 
         public static ResidentDrawerAuditReport AuditSceneRenderers(
             IReadOnlyList<MeshRenderer> renderers,
             Func<GameObject, bool> isStaticBatchingEnabledPredicate = null,
-            Func<Shader, bool> isShaderCompatiblePredicate = null)
+            Func<Shader, bool> isShaderCompatiblePredicate = null,
+            string sourceContextPath = "")
         {
             var report = new ResidentDrawerAuditReport();
             if (renderers == null) return report;
+
+            Func<Shader, bool> resolvedShaderCheck = isShaderCompatiblePredicate ?? IsShaderDotsInstancingCompatible;
 
             for (int i = 0; i < renderers.Count; i++)
             {
@@ -121,43 +146,66 @@ namespace YusufOkuducu.PcRenderGraphDoctor
 
                 report.totalMeshRenderers++;
                 bool hasStaticBatchFlag = isStaticBatchingEnabledPredicate != null &&
+                                          mr.gameObject != null &&
                                           isStaticBatchingEnabledPredicate(mr.gameObject);
 
-                bool shaderCompatible = true;
-                if (isShaderCompatiblePredicate != null && mr.sharedMaterial != null && mr.sharedMaterial.shader != null)
-                {
-                    shaderCompatible = isShaderCompatiblePredicate(mr.sharedMaterial.shader);
-                }
-
-                RendererEligibilityRecord rec = AnalyzeRenderer(mr, hasStaticBatchFlag, shaderCompatible);
-                if (rec.IsEligible)
-                {
-                    report.eligibleRenderers++;
-                }
-                else
-                {
-                    report.disqualifiedRenderers++;
-                    if ((rec.disqualifiers & ResidentDrawerDisqualifier.HasMaterialPropertyBlock) != 0)
-                        report.propertyBlockViolations++;
-                    if ((rec.disqualifiers & ResidentDrawerDisqualifier.InstancingDisabledOnMaterial) != 0)
-                        report.instancingDisabledViolations++;
-                    if ((rec.disqualifiers & ResidentDrawerDisqualifier.NegativeTransformScale) != 0)
-                        report.negativeScaleViolations++;
-                    if ((rec.disqualifiers & ResidentDrawerDisqualifier.StaticBatchingFlagConflict) != 0)
-                        report.staticBatchingConflicts++;
-                    if ((rec.disqualifiers & ResidentDrawerDisqualifier.LightProbeProxyVolumeUsed) != 0)
-                        report.lppvViolations++;
-                    if ((rec.disqualifiers & ResidentDrawerDisqualifier.ShaderMissingDotsInstancing) != 0)
-                        report.shaderIncompatibilityViolations++;
-                    if ((rec.disqualifiers & ResidentDrawerDisqualifier.HighPolyOverdrawRiskWithoutLOD) != 0)
-                        report.desktopOverdrawRiskMeshes++;
-                }
-
-                report.records.Add(rec);
+                RendererEligibilityRecord rec = AnalyzeRendererMultiMaterial(mr, hasStaticBatchFlag, resolvedShaderCheck, sourceContextPath);
+                AccumulateRecordIntoReport(report, rec);
             }
 
             report.records.Sort((a, b) => b.disqualifiers.CompareTo(a.disqualifiers));
             return report;
+        }
+
+        public static void AccumulateRecordIntoReport(ResidentDrawerAuditReport report, RendererEligibilityRecord rec)
+        {
+            if (report == null) return;
+            if (rec.IsEligible)
+            {
+                report.eligibleRenderers++;
+            }
+            else
+            {
+                report.disqualifiedRenderers++;
+                if ((rec.disqualifiers & ResidentDrawerDisqualifier.HasMaterialPropertyBlock) != 0)
+                    report.propertyBlockViolations++;
+                if ((rec.disqualifiers & ResidentDrawerDisqualifier.InstancingDisabledOnMaterial) != 0)
+                    report.instancingDisabledViolations++;
+                if ((rec.disqualifiers & ResidentDrawerDisqualifier.NegativeTransformScale) != 0)
+                    report.negativeScaleViolations++;
+                if ((rec.disqualifiers & ResidentDrawerDisqualifier.StaticBatchingFlagConflict) != 0)
+                    report.staticBatchingConflicts++;
+                if ((rec.disqualifiers & ResidentDrawerDisqualifier.LightProbeProxyVolumeUsed) != 0)
+                    report.lppvViolations++;
+                if ((rec.disqualifiers & ResidentDrawerDisqualifier.BlendProbesWithAnchorUnsupported) != 0)
+                    report.probeAnchorViolations++;
+                if ((rec.disqualifiers & ResidentDrawerDisqualifier.CustomVertexStreamsUsed) != 0)
+                    report.customVertexStreamViolations++;
+                if ((rec.disqualifiers & ResidentDrawerDisqualifier.LodAnimatedCrossFadeConflict) != 0)
+                    report.lodCrossFadeViolations++;
+                if ((rec.disqualifiers & ResidentDrawerDisqualifier.ShaderMissingDotsInstancing) != 0)
+                    report.shaderIncompatibilityViolations++;
+                if ((rec.disqualifiers & ResidentDrawerDisqualifier.HighPolyOverdrawRiskWithoutLOD) != 0)
+                    report.desktopOverdrawRiskMeshes++;
+            }
+
+            report.records.Add(rec);
+        }
+
+        /// <summary>
+        /// Checks whether a compiled Shader or ShaderGraph declares the `DOTS_INSTANCING_ON` keyword
+        /// in its `shader.keywordSpace`, working accurately across both `.shader` and `.shadergraph` assets.
+        /// </summary>
+        public static bool IsShaderDotsInstancingCompatible(Shader shader)
+        {
+            if (shader == null || !shader.isSupported)
+                return false;
+
+            // Built-in InternalErrorShader is never BRG-compatible
+            if (string.Equals(shader.name, "Hidden/InternalErrorShader", StringComparison.Ordinal))
+                return false;
+
+            return shader.keywordSpace.FindKeyword("DOTS_INSTANCING_ON").isValid;
         }
 
         public static RendererEligibilityRecord AnalyzeRenderer(
@@ -165,10 +213,24 @@ namespace YusufOkuducu.PcRenderGraphDoctor
             bool hasStaticBatchingFlag = false,
             bool isShaderCompatibleWithResidentDrawer = true)
         {
+            return AnalyzeRendererMultiMaterial(
+                mr,
+                hasStaticBatchingFlag,
+                _ => isShaderCompatibleWithResidentDrawer,
+                string.Empty);
+        }
+
+        public static RendererEligibilityRecord AnalyzeRendererMultiMaterial(
+            MeshRenderer mr,
+            bool hasStaticBatchingFlag,
+            Func<Shader, bool> shaderCompatibilityCheck,
+            string sourcePath = "")
+        {
             var flags = ResidentDrawerDisqualifier.None;
             var mf = mr.GetComponent<MeshFilter>();
             Mesh mesh = mf != null ? mf.sharedMesh : null;
-            int tris = mesh != null ? (int)(mesh.GetIndexCount(0) / 3) : 0;
+            int subMeshCount = mesh != null ? Math.Max(1, mesh.subMeshCount) : 0;
+            int tris = CalculateTotalTriangles(mesh);
 
             if (mesh == null)
                 flags |= ResidentDrawerDisqualifier.MissingMeshFilterOrMesh;
@@ -179,16 +241,40 @@ namespace YusufOkuducu.PcRenderGraphDoctor
             if (mr.lightProbeUsage == LightProbeUsage.UseProxyVolume)
                 flags |= ResidentDrawerDisqualifier.LightProbeProxyVolumeUsed;
 
-            Material mat = mr.sharedMaterial;
-            if (mat != null)
+            if (mr.lightProbeUsage == LightProbeUsage.BlendProbes && mr.probeAnchor != null)
+                flags |= ResidentDrawerDisqualifier.BlendProbesWithAnchorUnsupported;
+
+            if (mr.additionalVertexStreams != null || mr.enlightenVertexStream != null)
+                flags |= ResidentDrawerDisqualifier.CustomVertexStreamsUsed;
+
+            Material[] sharedMats = mr.sharedMaterials;
+            Material primaryMat = (sharedMats != null && sharedMats.Length > 0) ? sharedMats[0] : mr.sharedMaterial;
+
+            if (sharedMats != null && sharedMats.Length > 0)
             {
-                if (!mat.enableInstancing)
+                for (int m = 0; m < sharedMats.Length; m++)
+                {
+                    Material mat = sharedMats[m];
+                    if (mat == null) continue;
+                    if (primaryMat == null) primaryMat = mat;
+
+                    if (!mat.enableInstancing)
+                        flags |= ResidentDrawerDisqualifier.InstancingDisabledOnMaterial;
+
+                    if (mat.renderQueue >= 2500)
+                        flags |= ResidentDrawerDisqualifier.TransparentOrNonOpaqueQueue;
+
+                    if (shaderCompatibilityCheck != null && mat.shader != null && !shaderCompatibilityCheck(mat.shader))
+                        flags |= ResidentDrawerDisqualifier.ShaderMissingDotsInstancing;
+                }
+            }
+            else if (primaryMat != null)
+            {
+                if (!primaryMat.enableInstancing)
                     flags |= ResidentDrawerDisqualifier.InstancingDisabledOnMaterial;
-
-                if (mat.renderQueue >= 2500)
+                if (primaryMat.renderQueue >= 2500)
                     flags |= ResidentDrawerDisqualifier.TransparentOrNonOpaqueQueue;
-
-                if (!isShaderCompatibleWithResidentDrawer)
+                if (shaderCompatibilityCheck != null && primaryMat.shader != null && !shaderCompatibilityCheck(primaryMat.shader))
                     flags |= ResidentDrawerDisqualifier.ShaderMissingDotsInstancing;
             }
 
@@ -199,19 +285,49 @@ namespace YusufOkuducu.PcRenderGraphDoctor
             if (hasStaticBatchingFlag)
                 flags |= ResidentDrawerDisqualifier.StaticBatchingFlagConflict;
 
-            if (tris > 15000 && mr.GetComponentInParent<LODGroup>() == null)
+            LODGroup parentLod = mr.GetComponentInParent<LODGroup>();
+            if (parentLod != null && parentLod.fadeMode == LODFadeMode.CrossFade && parentLod.animateCrossFading)
+            {
+                bool supportsCrossFadeKw = primaryMat != null && primaryMat.shader != null &&
+                                           primaryMat.shader.keywordSpace.FindKeyword("LOD_FADE_CROSSFADE").isValid;
+                if (!supportsCrossFadeKw)
+                    flags |= ResidentDrawerDisqualifier.LodAnimatedCrossFadeConflict;
+            }
+
+            if (tris > 15000 && parentLod == null)
                 flags |= ResidentDrawerDisqualifier.HighPolyOverdrawRiskWithoutLOD;
 
-            return new RendererEligibilityRecord
+            var record = new RendererEligibilityRecord
             {
-                gameObjectName = mr.gameObject.name,
-                instanceId = mr.gameObject.GetInstanceID(),
-                materialName = mat != null ? mat.name : "<None>",
-                shaderName = (mat != null && mat.shader != null) ? mat.shader.name : "<None>",
+                gameObjectName = mr.gameObject != null ? mr.gameObject.name : "<MeshRenderer>",
+                assetOrScenePath = sourcePath ?? string.Empty,
+                targetGameObject = mr.gameObject,
+#if UNITY_6000_4_OR_NEWER
+                entityId = mr.gameObject != null ? mr.gameObject.GetEntityId() : default,
+#else
+                instanceId = mr.gameObject != null ? mr.gameObject.GetInstanceID() : 0,
+#endif
+                materialName = primaryMat != null ? primaryMat.name : "<None>",
+                shaderName = (primaryMat != null && primaryMat.shader != null) ? primaryMat.shader.name : "<None>",
+                subMeshCount = subMeshCount,
                 triangleCount = tris,
                 disqualifiers = flags,
                 recommendation = BuildRecommendation(flags)
             };
+
+            return record;
+        }
+
+        private static int CalculateTotalTriangles(Mesh mesh)
+        {
+            if (mesh == null) return 0;
+            int subCount = Math.Max(1, mesh.subMeshCount);
+            long totalIndices = 0;
+            for (int s = 0; s < subCount; s++)
+            {
+                totalIndices += mesh.GetIndexCount(s);
+            }
+            return (int)(totalIndices / 3L);
         }
 
         /// <summary>
@@ -341,7 +457,7 @@ namespace YusufOkuducu.PcRenderGraphDoctor
             var stack = new Stack<(bool parentActive, bool branchActive, bool seenActive)>();
             bool currentlyActive = true;
 
-            using (var reader = new System.IO.StringReader(source))
+            using (var reader = new StringReader(source))
             {
                 string line;
                 while ((line = reader.ReadLine()) != null)
@@ -353,7 +469,7 @@ namespace YusufOkuducu.PcRenderGraphDoctor
                         if (directive.StartsWith("ifdef", StringComparison.Ordinal) ||
                             directive.StartsWith("ifndef", StringComparison.Ordinal))
                         {
-                            stack.Push((currentlyActive, currentlyActive, currentlyActive));
+                            stack.Push((currentlyActive, currentlyActive, false));
                             sb.AppendLine();
                             continue;
                         }
@@ -361,10 +477,12 @@ namespace YusufOkuducu.PcRenderGraphDoctor
                             (directive.Length == 2 || char.IsWhiteSpace(directive[2]) || directive[2] == '('))
                         {
                             string expr = directive.Substring(2).Trim().Trim('(', ')').Trim();
-                            bool cond = !string.Equals(expr, "0", StringComparison.Ordinal) &&
-                                        !string.Equals(expr, "false", StringComparison.OrdinalIgnoreCase);
-                            bool active = currentlyActive && cond;
-                            stack.Push((currentlyActive, active, active));
+                            bool isFalse = string.Equals(expr, "0", StringComparison.Ordinal) ||
+                                           string.Equals(expr, "false", StringComparison.OrdinalIgnoreCase);
+                            bool isTrue = string.Equals(expr, "1", StringComparison.Ordinal) ||
+                                          string.Equals(expr, "true", StringComparison.OrdinalIgnoreCase);
+                            bool active = currentlyActive && !isFalse;
+                            stack.Push((currentlyActive, active, isTrue && active));
                             currentlyActive = active;
                             sb.AppendLine();
                             continue;
@@ -409,19 +527,25 @@ namespace YusufOkuducu.PcRenderGraphDoctor
             if (flags == ResidentDrawerDisqualifier.None)
                 return "Eligible for Unity 6 GPU Resident Drawer & SRP Batcher.";
 
-            var parts = new List<string>(6);
+            var parts = new List<string>(8);
             if ((flags & ResidentDrawerDisqualifier.MissingMeshFilterOrMesh) != 0)
                 parts.Add("Assign valid Mesh to MeshFilter");
             if ((flags & ResidentDrawerDisqualifier.HasMaterialPropertyBlock) != 0)
                 parts.Add("Clear MaterialPropertyBlock (breaks SRP Batcher & GPU Resident Drawer)");
             if ((flags & ResidentDrawerDisqualifier.InstancingDisabledOnMaterial) != 0)
-                parts.Add("Enable GPU Instancing on Material");
+                parts.Add("Enable GPU Instancing on all sub-mesh Materials");
             if ((flags & ResidentDrawerDisqualifier.StaticBatchingFlagConflict) != 0)
                 parts.Add("Disable Static Batching flag (conflicts with BatchRendererGroup instancing)");
             if ((flags & ResidentDrawerDisqualifier.NegativeTransformScale) != 0)
-                parts.Add("Fix negative transform scale (causes winding-order batch splits)");
+                parts.Add("Fix negative transform scale (forces flip-winding batch split)");
             if ((flags & ResidentDrawerDisqualifier.LightProbeProxyVolumeUsed) != 0)
-                parts.Add("Switch LightProbeUsage away from UseProxyVolume (LPPV is unsupported by GPU Resident Drawer)");
+                parts.Add("Switch LightProbeUsage away from UseProxyVolume (LPPV is unsupported by GRD)");
+            if ((flags & ResidentDrawerDisqualifier.BlendProbesWithAnchorUnsupported) != 0)
+                parts.Add("Clear MeshRenderer.probeAnchor or switch to Adaptive Probe Volumes (BlendProbes+probeAnchor is excluded from GRD)");
+            if ((flags & ResidentDrawerDisqualifier.CustomVertexStreamsUsed) != 0)
+                parts.Add("Remove additionalVertexStreams / enlightenVertexStream (unsupported by GRD)");
+            if ((flags & ResidentDrawerDisqualifier.LodAnimatedCrossFadeConflict) != 0)
+                parts.Add("Add #pragma multi_compile _ LOD_FADE_CROSSFADE to shader or disable LODGroup.animateCrossFading");
             if ((flags & ResidentDrawerDisqualifier.TransparentOrNonOpaqueQueue) != 0)
                 parts.Add("Use Opaque/AlphaTest queue for Resident Drawer indirect culling");
             if ((flags & ResidentDrawerDisqualifier.HighPolyOverdrawRiskWithoutLOD) != 0)

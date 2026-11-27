@@ -1,0 +1,28 @@
+{
+    "name": "YusufOkuducu.PcRenderGraphDoctor.Editor.PipelineCli",
+    "rootNamespace": "YusufOkuducu.PcRenderGraphDoctor.Editor.PipelineCli",
+    "references": [
+        "YusufOkuducu.PcRenderGraphDoctor.Runtime",
+        "YusufOkuducu.PcRenderGraphDoctor.Editor",
+        "Unity.Pipeline"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "YUSUF_UNITY_PIPELINE_CLI"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.unity.pipeline",
+            "expression": "0.0.1",
+            "define": "YUSUF_UNITY_PIPELINE_CLI"
+        }
+    ],
+    "noEngineReferences": false
+}

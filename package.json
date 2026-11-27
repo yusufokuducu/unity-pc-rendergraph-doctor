@@ -1,8 +1,8 @@
 {
   "name": "com.yusufokuducu.pc-rendergraph-doctor",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "displayName": "PC Unity 6 Render Graph & GPU Resident Drawer Doctor",
-  "description": "Audits and auto-fixes Unity 6 PC scenes and assemblies for GPU Resident Drawer (BatchRendererGroup) eligibility, MaterialPropertyBlock instancing breaks, static-batching conflicts, negative-scale winding splits, legacy ScriptableRenderPass -> RenderGraph migration, UI Toolkit heatmaps, and MCP / AI Agent auto-fix bridge.",
+  "description": "Audits and auto-fixes PC Unity 6 URP 17 Forward+/Deferred+ & BRG KeepAll pipeline prerequisites, full GRDExclusionReason scene/prefab MeshRenderer & multi-submesh DOTS_INSTANCING_ON compliance, 8-item official URP Render Graph C# pass checklist with capture-safe PassData field-hoisting auto-fixer, virtualized UI Toolkit Painter2D dashboard, and dual-channel Live MCP Server.",
   "unity": "2022.3",
   "unityRelease": "0f1",
   "documentationUrl": "https://github.com/yusufokuducu/unity-pc-rendergraph-doctor#readme",
@@ -13,12 +13,20 @@
     "unity6",
     "render-graph",
     "gpu-resident-drawer",
-    "batch-renderer-group",
-    "srp-batcher",
+    "batchrenderergroup",
+    "forward-plus",
+    "deferred-plus",
     "urp",
     "mcp",
     "ui-toolkit",
-    "diagnostics"
+    "performance"
+  ],
+  "samples": [
+    {
+      "displayName": "PC GPU Resident Drawer Scene Validator",
+      "description": "Demonstrates runtime BatchRendererGroup / GPU Resident Drawer multi-submesh scene eligibility validation.",
+      "path": "Samples~/RenderGraphDoctorDemo"
+    }
   ],
   "author": {
     "name": "Yusuf Okuducu",

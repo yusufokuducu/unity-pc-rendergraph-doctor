@@ -4,6 +4,7 @@
     <IsPackable>false</IsPackable>
     <Nullable>disable</Nullable>
     <LangVersion>9.0</LangVersion>
+    <DefineConstants>$(DefineConstants);YUSUF_DOTNET_TESTS;YUSUF_UNITY_PIPELINE_CLI</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>

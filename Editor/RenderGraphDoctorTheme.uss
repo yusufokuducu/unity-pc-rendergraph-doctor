@@ -1,0 +1,98 @@
+.doctor-root {
+    flex-grow: 1;
+    padding-top: 8px;
+    padding-bottom: 8px;
+    padding-left: 10px;
+    padding-right: 10px;
+}
+
+.theme-dark {
+    --surface-card: rgb(41, 42, 47);
+    --surface-elevated: rgb(49, 51, 57);
+    --text-primary: rgb(232, 234, 238);
+    --text-muted: rgb(172, 177, 186);
+    --border-subtle: rgb(66, 69, 77);
+}
+
+.theme-light {
+    --surface-card: rgb(235, 237, 241);
+    --surface-elevated: rgb(246, 247, 250);
+    --text-primary: rgb(28, 30, 35);
+    --text-muted: rgb(86, 92, 102);
+    --border-subtle: rgb(198, 203, 212);
+}
+
+.header-title {
+    font-size: 15px;
+    -unity-font-style: bold;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+
+.toolbar-row {
+    flex-direction: row;
+    margin-bottom: 6px;
+}
+
+.toolbar-btn {
+    flex-grow: 1;
+    height: 26px;
+    margin-right: 4px;
+}
+
+.toolbar-btn-last {
+    flex-grow: 1;
+    height: 26px;
+}
+
+.summary-card {
+    background-color: var(--surface-card);
+    border-top-width: 1px;
+    border-bottom-width: 1px;
+    border-left-width: 4px;
+    border-right-width: 1px;
+    border-top-color: var(--border-subtle);
+    border-bottom-color: var(--border-subtle);
+    border-right-color: var(--border-subtle);
+    padding-top: 8px;
+    padding-bottom: 8px;
+    padding-left: 10px;
+    padding-right: 10px;
+    margin-bottom: 8px;
+}
+
+.border-good {
+    border-left-color: rgb(61, 194, 107);
+}
+
+.border-warn {
+    border-left-color: rgb(235, 158, 41);
+}
+
+.border-crit {
+    border-left-color: rgb(224, 61, 61);
+}
+
+.eligibility-painter-bar {
+    height: 16px;
+    margin-top: 4px;
+    margin-bottom: 6px;
+    background-color: var(--surface-elevated);
+}
+
+.meta-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: normal;
+}
+
+.virtualized-table {
+    flex-grow: 1;
+    min-height: 180px;
+}
+
+.cell-label {
+    padding-left: 4px;
+    padding-right: 4px;
+    -unity-text-align: middle-left;
+}

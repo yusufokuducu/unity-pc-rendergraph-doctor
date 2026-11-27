@@ -8,30 +8,92 @@ using UnityEngine.UIElements;
 
 namespace YusufOkuducu.PcRenderGraphDoctor.Editor
 {
+    /// <summary>
+    /// Zero-GC Painter2D stacked horizontal bar chart for GPU Resident Drawer scene/prefab eligibility.
+    /// </summary>
+    public sealed class ResidentDrawerEligibilityChartElement : VisualElement
+    {
+        private ResidentDrawerHeatmapSummary _summary;
+
+        public ResidentDrawerEligibilityChartElement()
+        {
+            name = "eligibility-painter-chart";
+            AddToClassList("eligibility-painter-bar");
+            generateVisualContent += OnGenerateVisualContent;
+        }
+
+        public void SetSummary(ResidentDrawerHeatmapSummary summary)
+        {
+            _summary = summary;
+            MarkDirtyRepaint();
+        }
+
+        private void OnGenerateVisualContent(MeshGenerationContext ctx)
+        {
+            float w = contentRect.width;
+            float h = contentRect.height;
+            if (w < 2f || h < 2f)
+                return;
+
+            Painter2D p = ctx.painter2D;
+            DrawRect(p, 0f, 0f, w, h, new Color(0.12f, 0.12f, 0.14f, 1f));
+
+            if (_summary.totalRenderers <= 0)
+                return;
+
+            float eligW = w * Mathf.Clamp01(_summary.eligibilityRatio);
+            if (eligW > 0.1f)
+                DrawRect(p, 0f, 0f, eligW, h, new Color(0.24f, 0.76f, 0.42f, 1f));
+            if (w - eligW > 0.1f)
+                DrawRect(p, eligW, 0f, w - eligW, h, new Color(0.88f, 0.24f, 0.24f, 1f));
+        }
+
+        private static void DrawRect(Painter2D p, float x, float y, float w, float h, Color col)
+        {
+            p.fillColor = col;
+            p.BeginPath();
+            p.MoveTo(new Vector2(x, y));
+            p.LineTo(new Vector2(x + w, y));
+            p.LineTo(new Vector2(x + w, y + h));
+            p.LineTo(new Vector2(x, y + h));
+            p.ClosePath();
+            p.Fill();
+        }
+    }
+
     public sealed class RenderGraphDoctorWindow : EditorWindow
     {
         private ResidentDrawerAuditReport _sceneReport;
         private List<RenderPassMigrationFinding> _passFindings;
+        private PipelinePrerequisiteAuditResult _pipelineStatus;
+        private readonly List<RendererEligibilityRecord> _filteredSceneCache = new List<RendererEligibilityRecord>();
+        private readonly List<RenderPassMigrationFinding> _filteredPassCache = new List<RenderPassMigrationFinding>();
         private Vector2 _scrollScene;
-        private Vector2 _scrollPasses;
         private int _selectedTab;
         private string _searchFilter = string.Empty;
-        private static readonly string[] Tabs = { "GPU Resident Drawer (Scene)", "Render Graph Passes (Assemblies)" };
+        private bool _includeEligibleRows;
+        private static readonly string[] Tabs = { "GPU Resident Drawer (Scene & Prefabs)", "Render Graph Passes (User Assemblies)" };
 
-        // UI Toolkit containers
+        private VisualElement _pipelineBannerContainer;
         private VisualElement _heatmapContainer;
-        private ScrollView _contentScroll;
+        private VisualElement _tableHostContainer;
+        private MultiColumnListView _sceneTable;
+        private MultiColumnListView _passTable;
+        private ResidentDrawerEligibilityChartElement _eligibilityChart;
+        private Label _mcpStatusLabel;
 
         public ResidentDrawerAuditReport SceneReport => _sceneReport;
         public IReadOnlyList<RenderPassMigrationFinding> PassFindings => _passFindings;
         public int SelectedTab => _selectedTab;
         public string SearchFilter => _searchFilter;
+        public MultiColumnListView VirtualizedSceneTable => _sceneTable;
+        public MultiColumnListView VirtualizedPassTable => _passTable;
 
         [MenuItem("Window/Analysis/PC Render Graph & GPU Resident Drawer Doctor")]
         public static void ShowWindow()
         {
             var win = GetWindow<RenderGraphDoctorWindow>("PC RenderGraph Doctor");
-            win.minSize = new Vector2(720f, 520f);
+            win.minSize = new Vector2(800f, 580f);
             win.Show();
         }
 
@@ -42,29 +104,25 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
                 return;
 
             root.Clear();
-            root.style.paddingTop = 8f;
-            root.style.paddingBottom = 8f;
-            root.style.paddingLeft = 10f;
-            root.style.paddingRight = 10f;
+            ApplyThemeStyleSheet(root);
+            root.AddToClassList("doctor-root");
+            root.AddToClassList(EditorGUIUtility.isProSkin ? "theme-dark" : "theme-light");
 
-            var titleLabel = new Label("PC Unity 6 Render Graph & GPU Resident Drawer Doctor")
+            var titleLabel = new Label("PC Unity 6 Render Graph & GPU Resident Drawer Doctor (v2.0)")
             {
                 name = "header-title"
             };
-            titleLabel.style.fontSize = 15f;
-            titleLabel.style.marginBottom = 4f;
+            titleLabel.AddToClassList("header-title");
             root.Add(titleLabel);
 
             var infoBox = new HelpBox(
-                "Audits scene MeshRenderers and custom shaders for GPU Resident Drawer (BatchRendererGroup) disqualifiers and inspects compiled ScriptableRenderPass classes for Unity 6 RecordRenderGraph compliance.",
+                "Audits URP 17 Forward+/Deferred+ & BRG KeepAll prerequisites, scene/prefab MeshRenderers across all sub-meshes & GRDExclusionReason rules, and custom ScriptableRenderPass implementations against Unity's 8-item Render Graph checklist.",
                 HelpBoxMessageType.Info);
-            infoBox.style.marginBottom = 8f;
             root.Add(infoBox);
 
             // Tab Switcher Row
             var tabRow = new VisualElement { name = "tab-row" };
-            tabRow.style.flexDirection = FlexDirection.Row;
-            tabRow.style.marginBottom = 8f;
+            tabRow.AddToClassList("toolbar-row");
 
             var tabSceneBtn = new Button(() =>
             {
@@ -75,9 +133,7 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
                 name = "btn-tab-scene",
                 text = Tabs[0]
             };
-            tabSceneBtn.style.height = 26f;
-            tabSceneBtn.style.flexGrow = 1f;
-            tabSceneBtn.style.marginRight = 4f;
+            tabSceneBtn.AddToClassList("toolbar-btn");
 
             var tabPassBtn = new Button(() =>
             {
@@ -88,8 +144,7 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
                 name = "btn-tab-passes",
                 text = Tabs[1]
             };
-            tabPassBtn.style.height = 26f;
-            tabPassBtn.style.flexGrow = 1f;
+            tabPassBtn.AddToClassList("toolbar-btn-last");
 
             tabRow.Add(tabSceneBtn);
             tabRow.Add(tabPassBtn);
@@ -97,70 +152,94 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
 
             // Action Toolbar Row
             var actionRow = new VisualElement { name = "action-toolbar" };
-            actionRow.style.flexDirection = FlexDirection.Row;
-            actionRow.style.marginBottom = 8f;
+            actionRow.AddToClassList("toolbar-row");
 
             var auditSceneBtn = new Button(() =>
             {
                 RunSceneAudit();
+                _pipelineStatus = UrpPipelinePrerequisiteDoctor.AuditPipelinePrerequisites();
                 RefreshUiToolkitView();
             })
             {
                 name = "btn-audit-scene",
-                text = "Audit Scene Renderers"
+                text = "Audit Scene & Pipeline"
             };
-            auditSceneBtn.style.height = 28f;
-            auditSceneBtn.style.flexGrow = 1f;
-            auditSceneBtn.style.marginRight = 4f;
+            auditSceneBtn.AddToClassList("toolbar-btn");
+
+            var auditPrefabBtn = new Button(() =>
+            {
+                _sceneReport = UrpPipelinePrerequisiteDoctor.AuditProjectPrefabsForResidentDrawer("Assets");
+                _selectedTab = 0;
+                RefreshUiToolkitView();
+            })
+            {
+                name = "btn-audit-prefabs",
+                text = "Audit Project Prefabs"
+            };
+            auditPrefabBtn.AddToClassList("toolbar-btn");
 
             var autoFixBtn = new Button(() =>
             {
+                UrpPipelinePrerequisiteDoctor.AutoConfigurePipelineForResidentDrawer();
                 AutoFixSceneRenderers();
                 RunSceneAudit();
+                _pipelineStatus = UrpPipelinePrerequisiteDoctor.AuditPipelinePrerequisites();
                 RefreshUiToolkitView();
             })
             {
                 name = "btn-autofix-scene",
-                text = "Auto-Fix Disqualified Renderers"
+                text = "Auto-Fix Pipeline & Scene"
             };
-            autoFixBtn.style.height = 28f;
-            autoFixBtn.style.flexGrow = 1f;
-            autoFixBtn.style.marginRight = 4f;
+            autoFixBtn.AddToClassList("toolbar-btn");
 
             var scanAsmBtn = new Button(() =>
             {
                 _passFindings = RenderGraphAssemblyAuditor.AuditAllLoadedRenderPasses();
+                _selectedTab = 1;
                 RefreshUiToolkitView();
             })
             {
                 name = "btn-scan-passes",
-                text = "Scan ScriptableRenderPass Assemblies"
+                text = "Scan User RenderPasses"
             };
-            scanAsmBtn.style.height = 28f;
-            scanAsmBtn.style.flexGrow = 1f;
-            scanAsmBtn.style.marginRight = 4f;
+            scanAsmBtn.AddToClassList("toolbar-btn");
+
+            var mcpBtn = new Button(() =>
+            {
+                RenderGraphDoctorMcpLiveServer.ToggleSharedServerMenu();
+                UpdateMcpStatusBadge();
+            })
+            {
+                name = "btn-toggle-mcp",
+                text = "Toggle Live MCP"
+            };
+            mcpBtn.AddToClassList("toolbar-btn");
 
             var exportBtn = new Button(ExportReports)
             {
                 name = "btn-export",
-                text = "Export MD / MCP JSON"
+                text = "Export MD / JSON"
             };
-            exportBtn.style.height = 28f;
-            exportBtn.style.flexGrow = 1f;
+            exportBtn.AddToClassList("toolbar-btn-last");
 
             actionRow.Add(auditSceneBtn);
+            actionRow.Add(auditPrefabBtn);
             actionRow.Add(autoFixBtn);
             actionRow.Add(scanAsmBtn);
+            actionRow.Add(mcpBtn);
             actionRow.Add(exportBtn);
             root.Add(actionRow);
 
-            // Search Field
-            var searchField = new TextField("Search GameObject / Material / RenderPass")
+            _mcpStatusLabel = new Label { name = "mcp-status-label" };
+            _mcpStatusLabel.AddToClassList("meta-label");
+            root.Add(_mcpStatusLabel);
+            UpdateMcpStatusBadge();
+
+            var searchField = new TextField("Search GameObject / Material / Shader / RenderPass")
             {
                 name = "search-field",
                 value = _searchFilter
             };
-            searchField.style.marginBottom = 8f;
             searchField.RegisterValueChangedCallback(evt =>
             {
                 _searchFilter = evt.newValue ?? string.Empty;
@@ -168,24 +247,168 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
             });
             root.Add(searchField);
 
+            _pipelineBannerContainer = new VisualElement { name = "pipeline-banner-container" };
+            root.Add(_pipelineBannerContainer);
+
             _heatmapContainer = new VisualElement { name = "heatmap-container" };
-            _heatmapContainer.style.marginBottom = 8f;
             root.Add(_heatmapContainer);
 
-            _contentScroll = new ScrollView { name = "content-scroll" };
-            _contentScroll.style.flexGrow = 1f;
-            root.Add(_contentScroll);
+            _tableHostContainer = new VisualElement { name = "table-host-container" };
+            _tableHostContainer.AddToClassList("virtualized-table");
+            root.Add(_tableHostContainer);
+
+            _sceneTable = BuildVirtualizedSceneTable();
+            _passTable = BuildVirtualizedPassTable();
 
             RefreshUiToolkitView();
         }
 
+        private MultiColumnListView BuildVirtualizedSceneTable()
+        {
+            var table = new MultiColumnListView
+            {
+                name = "scene-eligibility-table",
+                fixedItemHeight = 26f,
+                virtualizationMethod = CollectionVirtualizationMethod.FixedHeight,
+                selectionType = SelectionType.Single,
+                showAlternatingRowBackgrounds = AlternatingRowBackground.ContentOnly
+            };
+            table.AddToClassList("virtualized-table");
+
+            AddTextColumn(table, "go", "GameObject", 165f, true, i => _filteredSceneCache[i].gameObjectName);
+            AddTextColumn(table, "tris", "SubM / Tris", 86f, false, i => $"{Math.Max(1, _filteredSceneCache[i].subMeshCount)} / {_filteredSceneCache[i].triangleCount}");
+            AddTextColumn(table, "mat", "Material (Shader)", 190f, true, i => $"{_filteredSceneCache[i].materialName} ({_filteredSceneCache[i].shaderName})");
+            AddTextColumn(table, "disq", "Disqualifiers", 185f, false, i => _filteredSceneCache[i].disqualifiers.ToString());
+            AddTextColumn(table, "rec", "Fix Recommendation", 220f, true, i => _filteredSceneCache[i].recommendation);
+
+            var selectCol = new Column
+            {
+                name = "select",
+                title = "Ping",
+                width = 64f,
+                minWidth = 56f,
+                stretchable = false,
+                makeCell = () =>
+                {
+                    var btn = new Button { text = "Select" };
+                    btn.clicked += () =>
+                    {
+                        if (btn.userData is int rowIdx && rowIdx >= 0 && rowIdx < _filteredSceneCache.Count)
+                        {
+                            SelectRecordTarget(_filteredSceneCache[rowIdx]);
+                        }
+                    };
+                    return btn;
+                },
+                bindCell = (el, idx) =>
+                {
+                    if (el is Button btn)
+                        btn.userData = idx;
+                }
+            };
+            table.columns.Add(selectCol);
+
+            table.itemsSource = _filteredSceneCache;
+            return table;
+        }
+
+        private MultiColumnListView BuildVirtualizedPassTable()
+        {
+            var table = new MultiColumnListView
+            {
+                name = "renderpass-migration-table",
+                fixedItemHeight = 26f,
+                virtualizationMethod = CollectionVirtualizationMethod.FixedHeight,
+                selectionType = SelectionType.Single,
+                showAlternatingRowBackgrounds = AlternatingRowBackground.ContentOnly
+            };
+            table.AddToClassList("virtualized-table");
+
+            AddTextColumn(table, "type", "ScriptableRenderPass Type", 240f, true, i => _filteredPassCache[i].typeFullName);
+            AddTextColumn(table, "asm", "User Assembly", 160f, false, i => _filteredPassCache[i].assemblyName);
+            AddTextColumn(table, "rg", "RecordRenderGraph", 118f, false, i => _filteredPassCache[i].implementsRecordRenderGraph ? "Yes" : "NO");
+            AddTextColumn(table, "exec", "Legacy Execute", 105f, false, i => _filteredPassCache[i].implementsLegacyExecute ? "Yes" : "No");
+            AddTextColumn(table, "status", "Unity 6 Status", 240f, true, i => _filteredPassCache[i].migrationStatus);
+
+            table.itemsSource = _filteredPassCache;
+            return table;
+        }
+
+        private static void AddTextColumn(
+            MultiColumnListView table,
+            string colName,
+            string title,
+            float width,
+            bool stretchable,
+            Func<int, string> selector)
+        {
+            table.columns.Add(new Column
+            {
+                name = colName,
+                title = title,
+                width = width,
+                minWidth = 50f,
+                stretchable = stretchable,
+                makeCell = () =>
+                {
+                    var l = new Label();
+                    l.AddToClassList("cell-label");
+                    return l;
+                },
+                bindCell = (el, idx) =>
+                {
+                    if (el is Label l && idx >= 0 && table.itemsSource != null && idx < table.itemsSource.Count)
+                        l.text = selector(idx) ?? string.Empty;
+                }
+            });
+        }
+
+        private static void SelectRecordTarget(RendererEligibilityRecord rec)
+        {
+            if (rec.targetGameObject != null)
+            {
+                Selection.activeObject = rec.targetGameObject;
+                return;
+            }
+#if UNITY_6000_4_OR_NEWER
+            UnityEngine.Object obj = EditorUtility.EntityIdToObject(rec.entityId);
+#else
+            UnityEngine.Object obj = EditorUtility.InstanceIDToObject(rec.instanceId);
+#endif
+            if (obj != null)
+                Selection.activeObject = obj;
+        }
+
+        private void UpdateMcpStatusBadge()
+        {
+            if (_mcpStatusLabel == null) return;
+            RenderGraphDoctorMcpLiveServer srv = RenderGraphDoctorMcpLiveServer.Shared;
+            _mcpStatusLabel.text = srv.IsRunning
+                ? $"Live Loopback MCP Server: ONLINE at {srv.EndpointUrl}"
+                : "Live Loopback MCP Server: Stopped (Click 'Toggle Live MCP' or use Unity 6 `unity mcp`)";
+        }
+
+        private static void ApplyThemeStyleSheet(VisualElement root)
+        {
+            string[] guids = AssetDatabase.FindAssets("RenderGraphDoctorTheme t:StyleSheet");
+            if (guids != null && guids.Length > 0)
+            {
+                var sheet = AssetDatabase.LoadAssetAtPath<StyleSheet>(AssetDatabase.GUIDToAssetPath(guids[0]));
+                if (sheet != null)
+                    root.styleSheets.Add(sheet);
+            }
+        }
+
         public void SetCustomAuditData(
             ResidentDrawerAuditReport sceneReport,
-            List<RenderPassMigrationFinding> passFindings = null)
+            List<RenderPassMigrationFinding> passFindings = null,
+            PipelinePrerequisiteAuditResult pipelineStatus = null)
         {
             _sceneReport = sceneReport;
             if (passFindings != null)
                 _passFindings = passFindings;
+            if (pipelineStatus != null)
+                _pipelineStatus = pipelineStatus;
             RefreshUiToolkitView();
         }
 
@@ -201,17 +424,24 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
             RefreshUiToolkitView();
         }
 
-        public List<RendererEligibilityRecord> GetFilteredSceneRecords(bool includeEligible = false)
+        public void SetIncludeEligibleRows(bool includeEligible)
+        {
+            _includeEligibleRows = includeEligible;
+            RefreshUiToolkitView();
+        }
+
+        public List<RendererEligibilityRecord> GetFilteredSceneRecords(bool? includeEligibleOverride = null)
         {
             var list = new List<RendererEligibilityRecord>();
             if (_sceneReport == null || _sceneReport.records == null)
                 return list;
 
+            bool showEligible = includeEligibleOverride ?? _includeEligibleRows;
             string q = (_searchFilter ?? string.Empty).Trim();
             for (int i = 0; i < _sceneReport.records.Count; i++)
             {
                 RendererEligibilityRecord r = _sceneReport.records[i];
-                if (!includeEligible && r.IsEligible)
+                if (!showEligible && r.IsEligible)
                     continue;
 
                 if (!string.IsNullOrEmpty(q))
@@ -257,81 +487,70 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
 
         public void RefreshUiToolkitView()
         {
-            if (_heatmapContainer == null || _contentScroll == null)
+            if (_heatmapContainer == null || _tableHostContainer == null)
                 return;
 
+            _pipelineBannerContainer?.Clear();
+            if (_pipelineBannerContainer != null && _pipelineStatus != null && !_pipelineStatus.isFullyReadyForResidentDrawer)
+            {
+                var warnBox = new HelpBox(
+                    "PIPELINE PREREQUISITE ISSUE: " + string.Join(" ", _pipelineStatus.issues),
+                    HelpBoxMessageType.Warning);
+                _pipelineBannerContainer.Add(warnBox);
+            }
+
             _heatmapContainer.Clear();
-            _contentScroll.Clear();
-
             ResidentDrawerHeatmapSummary heatmap = RenderGraphDoctorMcpBridge.ComputeHeatmapSummary(_sceneReport, _passFindings);
-            _heatmapContainer.Add(BuildHeatmapCard(heatmap));
+            _heatmapContainer.Add(BuildHeatmapCard(heatmap, out _eligibilityChart));
 
+            _tableHostContainer.Clear();
             if (_selectedTab == 0)
             {
-                List<RendererEligibilityRecord> filtered = GetFilteredSceneRecords(includeEligible: false);
-                for (int i = 0; i < filtered.Count; i++)
+                _filteredSceneCache.Clear();
+                _filteredSceneCache.AddRange(GetFilteredSceneRecords());
+                if (_sceneTable != null)
                 {
-                    _contentScroll.Add(BuildRendererFindingCard(filtered[i]));
+                    _sceneTable.itemsSource = _filteredSceneCache;
+                    _sceneTable.Rebuild();
+                    _tableHostContainer.Add(_sceneTable);
                 }
             }
             else
             {
-                List<RenderPassMigrationFinding> filteredPasses = GetFilteredPassFindings();
-                for (int i = 0; i < filteredPasses.Count; i++)
+                _filteredPassCache.Clear();
+                _filteredPassCache.AddRange(GetFilteredPassFindings());
+                if (_passTable != null)
                 {
-                    _contentScroll.Add(BuildRenderPassFindingCard(filteredPasses[i]));
+                    _passTable.itemsSource = _filteredPassCache;
+                    _passTable.Rebuild();
+                    _tableHostContainer.Add(_passTable);
                 }
             }
         }
 
-        public static VisualElement BuildHeatmapCard(ResidentDrawerHeatmapSummary h)
+        public static VisualElement BuildHeatmapCard(
+            ResidentDrawerHeatmapSummary h,
+            out ResidentDrawerEligibilityChartElement chart)
         {
             var card = new VisualElement { name = "resident-drawer-heatmap-card" };
-            card.style.paddingTop = 8f;
-            card.style.paddingBottom = 8f;
-            card.style.paddingLeft = 10f;
-            card.style.paddingRight = 10f;
-            card.style.backgroundColor = new Color(0.16f, 0.16f, 0.18f, 1f);
+            card.AddToClassList("summary-card");
+            card.AddToClassList(h.disqualifiedRenderers > 0 ? "border-warn" : "border-good");
 
             var title = new Label(
                 $"GPU Resident Drawer & Render Graph Heatmap — MeshRenderers: {h.totalRenderers} (Eligible: {h.eligibleRenderers} | Disqualified: {h.disqualifiedRenderers})");
-            title.style.marginBottom = 4f;
             card.Add(title);
 
-            // Stacked horizontal Eligibility vs Disqualified bar
-            var barTrack = new VisualElement { name = "eligibility-distribution-bar" };
-            barTrack.style.flexDirection = FlexDirection.Row;
-            barTrack.style.height = 14f;
-            barTrack.style.marginBottom = 6f;
-            barTrack.style.backgroundColor = new Color(0.1f, 0.1f, 0.1f, 1f);
-
-            if (h.totalRenderers > 0)
-            {
-                if (h.eligibilityRatio > 0f)
-                {
-                    var eligSeg = new VisualElement { name = "seg-eligible" };
-                    eligSeg.style.flexGrow = h.eligibilityRatio;
-                    eligSeg.style.height = 14f;
-                    eligSeg.style.backgroundColor = new Color(0.24f, 0.76f, 0.42f, 1f);
-                    barTrack.Add(eligSeg);
-                }
-                if (h.disqualifiedRatio > 0f)
-                {
-                    var disqSeg = new VisualElement { name = "seg-disqualified" };
-                    disqSeg.style.flexGrow = h.disqualifiedRatio;
-                    disqSeg.style.height = 14f;
-                    disqSeg.style.backgroundColor = new Color(0.88f, 0.24f, 0.24f, 1f);
-                    barTrack.Add(disqSeg);
-                }
-            }
-            card.Add(barTrack);
+            chart = new ResidentDrawerEligibilityChartElement();
+            chart.SetSummary(h);
+            card.Add(chart);
 
             var disqualifierBreakdown = new Label(
-                $"MPB Breaks: {h.propertyBlockViolations} | Instancing Off: {h.instancingDisabledViolations} | " +
-                $"StaticBatch Conflicts: {h.staticBatchingConflicts} | Negative Scale: {h.negativeScaleViolations} | " +
-                $"LPPV: {h.lppvViolations} | Shader Missing DOTS: {h.shaderIncompatibilityViolations} | Overdraw Risk: {h.desktopOverdrawRiskMeshes}");
-            disqualifierBreakdown.style.fontSize = 11f;
-            disqualifierBreakdown.style.marginBottom = 4f;
+                $"MPB: {h.propertyBlockViolations} | Instancing Off: {h.instancingDisabledViolations} | " +
+                $"StaticBatch: {h.staticBatchingConflicts} | NegScale: {h.negativeScaleViolations} | " +
+                $"LPPV: {h.lppvViolations} | ProbeAnchor: {h.probeAnchorViolations} | " +
+                $"VertexStreams: {h.customVertexStreamViolations} | LODFade: {h.lodCrossFadeViolations} | " +
+                $"Missing DOTS Kw: {h.shaderIncompatibilityViolations}");
+            disqualifierBreakdown.AddToClassList("meta-label");
             card.Add(disqualifierBreakdown);
 
             var passBar = new ProgressBar
@@ -340,82 +559,9 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
                 lowValue = 0f,
                 highValue = 100f,
                 value = h.renderGraphMigrationRatio * 100f,
-                title = $"Render Graph Pass Migration: {(h.renderGraphMigrationRatio * 100f):F0}% (Native: {h.nativeRenderGraphPasses} | Dual-Path: {h.dualPathPasses} | Legacy-Only: {h.legacyOnlyPasses})"
+                title = $"User RenderPass Migration: {(h.renderGraphMigrationRatio * 100f):F0}% (Native: {h.nativeRenderGraphPasses} | Dual-Path: {h.dualPathPasses} | Legacy-Only: {h.legacyOnlyPasses})"
             };
             card.Add(passBar);
-
-            return card;
-        }
-
-        private static VisualElement BuildRendererFindingCard(RendererEligibilityRecord r)
-        {
-            var card = new VisualElement { name = $"renderer-card-{r.gameObjectName}" };
-            card.style.marginBottom = 6f;
-            card.style.paddingTop = 6f;
-            card.style.paddingBottom = 6f;
-            card.style.paddingLeft = 8f;
-            card.style.paddingRight = 8f;
-            card.style.borderLeftWidth = 4f;
-            card.style.borderLeftColor = r.IsEligible
-                ? new Color(0.24f, 0.76f, 0.42f, 1f)
-                : new Color(0.88f, 0.24f, 0.24f, 1f);
-            card.style.backgroundColor = new Color(0.21f, 0.21f, 0.23f, 1f);
-
-            var headerRow = new VisualElement();
-            headerRow.style.flexDirection = FlexDirection.Row;
-            headerRow.style.justifyContent = Justify.SpaceBetween;
-            headerRow.style.alignItems = Align.Center;
-
-            var title = new Label($"{r.gameObjectName} ({r.triangleCount} tris) — [{r.disqualifiers}]");
-            headerRow.Add(title);
-
-            var selectBtn = new Button(() =>
-            {
-                UnityEngine.Object obj = EditorUtility.InstanceIDToObject(r.instanceId);
-                if (obj != null) Selection.activeObject = obj;
-            })
-            {
-                text = "Select"
-            };
-            selectBtn.style.width = 60f;
-            headerRow.Add(selectBtn);
-            card.Add(headerRow);
-
-            var matLabel = new Label($"Material: {r.materialName} ({r.shaderName})");
-            matLabel.style.fontSize = 11f;
-            card.Add(matLabel);
-
-            var fixLabel = new Label($"Fix: {r.recommendation}");
-            fixLabel.style.whiteSpace = WhiteSpace.Normal;
-            card.Add(fixLabel);
-
-            return card;
-        }
-
-        private static VisualElement BuildRenderPassFindingCard(RenderPassMigrationFinding f)
-        {
-            var card = new VisualElement { name = $"pass-card-{f.typeFullName}" };
-            card.style.marginBottom = 6f;
-            card.style.paddingTop = 6f;
-            card.style.paddingBottom = 6f;
-            card.style.paddingLeft = 8f;
-            card.style.paddingRight = 8f;
-            card.style.borderLeftWidth = 4f;
-            card.style.borderLeftColor = f.implementsRecordRenderGraph
-                ? new Color(0.24f, 0.76f, 0.42f, 1f)
-                : new Color(0.92f, 0.62f, 0.16f, 1f);
-            card.style.backgroundColor = new Color(0.21f, 0.21f, 0.23f, 1f);
-
-            var title = new Label($"{f.typeFullName} [{f.assemblyName}]");
-            card.Add(title);
-
-            var flagsLabel = new Label($"RecordRenderGraph: {f.implementsRecordRenderGraph} | Legacy Execute: {f.implementsLegacyExecute}");
-            flagsLabel.style.fontSize = 11f;
-            card.Add(flagsLabel);
-
-            var statusLabel = new Label(f.migrationStatus);
-            statusLabel.style.whiteSpace = WhiteSpace.Normal;
-            card.Add(statusLabel);
 
             return card;
         }
@@ -427,117 +573,21 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
 
             EditorGUILayout.Space(6f);
             EditorGUILayout.LabelField("PC Unity 6 Render Graph & GPU Resident Drawer Doctor", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox(
-                "Audits scene MeshRenderers and custom shaders for GPU Resident Drawer (BatchRendererGroup) disqualifiers and inspects compiled ScriptableRenderPass classes for Unity 6 RecordRenderGraph compliance.",
-                MessageType.Info);
-
-            _selectedTab = GUILayout.Toolbar(_selectedTab, Tabs, GUILayout.Height(26f));
-            EditorGUILayout.Space(6f);
-
-            if (_selectedTab == 0)
-                DrawResidentDrawerTab();
-            else
-                DrawRenderGraphPassesTab();
-        }
-
-        private void DrawResidentDrawerTab()
-        {
-            EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Audit Scene for GPU Resident Drawer", GUILayout.Height(28f)))
-            {
-                RunSceneAudit();
-            }
-
-            if (GUILayout.Button("Auto-Fix Eligible Material Instancing & Static Flags", GUILayout.Height(28f)))
-            {
-                AutoFixSceneRenderers();
-                RunSceneAudit();
-            }
-
-            if (GUILayout.Button("Export Markdown & MCP JSON Report", GUILayout.Height(28f)))
-            {
-                ExportReports();
-            }
-            EditorGUILayout.EndHorizontal();
-
-            if (_sceneReport == null) return;
-
-            EditorGUILayout.Space(6f);
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField(
-                $"Total MeshRenderers: {_sceneReport.totalMeshRenderers} | " +
-                $"Eligible: {_sceneReport.eligibleRenderers} | " +
-                $"Disqualified: {_sceneReport.disqualifiedRenderers}",
-                EditorStyles.boldLabel);
-            EditorGUILayout.LabelField(
-                $"MaterialPropertyBlock Breaks: {_sceneReport.propertyBlockViolations} | " +
-                $"Instancing Off: {_sceneReport.instancingDisabledViolations} | " +
-                $"StaticBatch Conflicts: {_sceneReport.staticBatchingConflicts} | " +
-                $"Negative Scale: {_sceneReport.negativeScaleViolations} | " +
-                $"LPPV Used: {_sceneReport.lppvViolations}");
-
             _scrollScene = EditorGUILayout.BeginScrollView(_scrollScene);
-            List<RendererEligibilityRecord> filtered = GetFilteredSceneRecords(includeEligible: false);
-            for (int i = 0; i < filtered.Count; i++)
+            foreach (var r in GetFilteredSceneRecords())
             {
-                var r = filtered[i];
-
-                EditorGUILayout.BeginVertical(GUI.skin.box);
-                EditorGUILayout.BeginHorizontal();
-                EditorGUILayout.LabelField($"{r.gameObjectName} ({r.triangleCount} tris) — [{r.disqualifiers}]", EditorStyles.boldLabel);
-                if (GUILayout.Button("Select", GUILayout.Width(60f)))
-                {
-                    UnityEngine.Object obj = EditorUtility.InstanceIDToObject(r.instanceId);
-                    if (obj != null) Selection.activeObject = obj;
-                }
-                EditorGUILayout.EndHorizontal();
-                EditorGUILayout.LabelField($"Material: {r.materialName} ({r.shaderName})", EditorStyles.miniLabel);
-                EditorGUILayout.LabelField($"Fix: {r.recommendation}", EditorStyles.wordWrappedMiniLabel);
-                EditorGUILayout.EndVertical();
-            }
-            EditorGUILayout.EndScrollView();
-            EditorGUILayout.EndVertical();
-        }
-
-        private void DrawRenderGraphPassesTab()
-        {
-            EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Scan Compiled Assemblies for ScriptableRenderPass", GUILayout.Height(28f)))
-            {
-                _passFindings = RenderGraphAssemblyAuditor.AuditAllLoadedRenderPasses();
-            }
-
-            if (GUILayout.Button("Export Pass Audit Markdown & MCP JSON", GUILayout.Height(28f)))
-            {
-                ExportReports();
-            }
-            EditorGUILayout.EndHorizontal();
-
-            if (_passFindings == null) return;
-
-            EditorGUILayout.Space(6f);
-            _scrollPasses = EditorGUILayout.BeginScrollView(_scrollPasses);
-            List<RenderPassMigrationFinding> filtered = GetFilteredPassFindings();
-            for (int i = 0; i < filtered.Count; i++)
-            {
-                var f = filtered[i];
-                EditorGUILayout.BeginVertical(GUI.skin.box);
-                EditorGUILayout.LabelField($"{f.typeFullName} [{f.assemblyName}]", EditorStyles.boldLabel);
-                EditorGUILayout.LabelField(
-                    $"RecordRenderGraph: {f.implementsRecordRenderGraph} | Legacy Execute: {f.implementsLegacyExecute}",
-                    EditorStyles.miniLabel);
-                EditorGUILayout.LabelField(f.migrationStatus, EditorStyles.wordWrappedMiniLabel);
-                EditorGUILayout.EndVertical();
+                EditorGUILayout.LabelField($"{r.gameObjectName} — [{r.disqualifiers}]");
             }
             EditorGUILayout.EndScrollView();
         }
 
         private void RunSceneAudit()
         {
-            MeshRenderer[] renderers = FindObjectsByType<MeshRenderer>(FindObjectsSortMode.None);
+            MeshRenderer[] renderers = GpuResidentDrawerAuditor.FindAllActiveMeshRenderers();
             _sceneReport = GpuResidentDrawerAuditor.AuditSceneRenderers(
                 renderers,
-                go => GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.BatchingStatic));
+                go => GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.BatchingStatic),
+                GpuResidentDrawerAuditor.IsShaderDotsInstancingCompatible);
         }
 
         private void ExportReports()
@@ -546,6 +596,8 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
                 RunSceneAudit();
             if (_passFindings == null)
                 _passFindings = RenderGraphAssemblyAuditor.AuditAllLoadedRenderPasses();
+            if (_pipelineStatus == null)
+                _pipelineStatus = UrpPipelinePrerequisiteDoctor.AuditPipelinePrerequisites();
 
             string path = EditorUtility.SaveFilePanel("Export Render Graph Doctor Report", "", "RenderGraphDoctorReport.md", "md");
             if (!string.IsNullOrEmpty(path))
@@ -557,14 +609,14 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
                 File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
 
                 string jsonPath = Path.ChangeExtension(path, ".json");
-                File.WriteAllText(jsonPath, RenderGraphDoctorMcpBridge.ExportFullMcpReportToJson(_sceneReport, _passFindings), Encoding.UTF8);
+                File.WriteAllText(jsonPath, RenderGraphDoctorMcpBridge.ExportFullMcpReportToJson(_sceneReport, _passFindings, _pipelineStatus), Encoding.UTF8);
                 EditorUtility.RevealInFinder(path);
             }
         }
 
         private static void AutoFixSceneRenderers()
         {
-            MeshRenderer[] renderers = FindObjectsByType<MeshRenderer>(FindObjectsSortMode.None);
+            MeshRenderer[] renderers = GpuResidentDrawerAuditor.FindAllActiveMeshRenderers();
             RenderGraphDoctorMcpBridge.AutoFixSceneRenderers(renderers);
         }
     }
