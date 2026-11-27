@@ -70,7 +70,7 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
     public static class RenderGraphDoctorMcpBridge
     {
         public const string ServerName = "unity-pc-rendergraph-doctor";
-        public const string PackageVersion = "2.0.0";
+        public const string PackageVersion = "2.0.1";
         public const string McpProtocolVersion = "2024-11-05";
         public const string LatestReportResourceUri = "mcp://unity-pc-rendergraph-doctor/latest-report";
 

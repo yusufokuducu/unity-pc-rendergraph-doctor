@@ -169,6 +169,14 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
                 if (assemblyName.StartsWith(IgnoredEngineAssemblyPrefixes[i], StringComparison.Ordinal))
                     return true;
             }
+
+            if (assemblyName.EndsWith(".Tests", StringComparison.OrdinalIgnoreCase) ||
+                assemblyName.IndexOf(".Tests.", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                assemblyName.StartsWith("YusufOkuducu.PcRenderGraphDoctor", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
             return false;
         }
 
@@ -969,7 +977,11 @@ namespace YusufOkuducu.PcRenderGraphDoctor.Editor
             while (current != null && current != typeof(object))
             {
                 if (string.Equals(current.Name, baseTypeName, StringComparison.Ordinal))
-                    return true;
+                {
+                    string ns = current.Namespace ?? string.Empty;
+                    if (ns.StartsWith("UnityEngine.Rendering", StringComparison.Ordinal))
+                        return true;
+                }
                 current = current.BaseType;
             }
             return false;

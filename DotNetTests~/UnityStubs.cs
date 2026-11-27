@@ -366,8 +366,7 @@ namespace Unity.Pipeline.Commands
     {
         public bool MainThreadRequired { get; set; } = true;
         public string[] Tags { get; set; }
-        public CliCommandAttribute(string name, string description = "") { }
-        public CliCommandAttribute(string group, string name, string description = "") { }
+        public CliCommandAttribute(string name, string description) { }
     }
 
     [AttributeUsage(AttributeTargets.Parameter)]

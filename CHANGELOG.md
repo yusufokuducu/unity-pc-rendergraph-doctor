@@ -2,6 +2,14 @@
 
 All notable changes to `com.yusufokuducu.pc-rendergraph-doctor` are documented in this file.
 
+## [2.0.1] - 2026-11-27
+
+### Fixed
+- **Unity `6000.6.0f1` & `com.unity.pipeline` `0.8.0-exp.1` Verification**:
+  - Pinned `versionDefines` to `com.unity.pipeline` `0.8.0-exp.1`, referenced `Unity.Pipeline.Attributes`, and fixed `[CliCommand]` attributes to the 2-argument signature with `Tags` (`rendergraph_doctor_audit`, `rendergraph_doctor_configure_pipeline`, `rendergraph_doctor_autofix_scene`, `rendergraph_doctor_audit_prefabs`).
+  - Excluded `*.Tests` assemblies and non-`UnityEngine.Rendering` mock `ScriptableRenderPass` base classes from `RenderGraphAssemblyAuditor.AuditAllLoadedRenderPasses()` so adding the package to `manifest.json` `testables` cannot false-fail CI quality gates with unit-test fixture passes.
+  - Added missing `#pragma vertex` / `#pragma fragment` directives to EditMode `DOTS_INSTANCING_ON` test shaders so real Unity 6000.6 compiles them and populates `shader.keywordSpace`.
+
 ## [2.0.0] - 2026-11-26
 
 ### Added

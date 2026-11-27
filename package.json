@@ -1,6 +1,6 @@
 {
   "name": "com.yusufokuducu.pc-rendergraph-doctor",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "displayName": "PC Unity 6 Render Graph & GPU Resident Drawer Doctor",
   "description": "Audits and auto-fixes PC Unity 6 URP 17 Forward+/Deferred+ & BRG KeepAll pipeline prerequisites, full GRDExclusionReason scene/prefab MeshRenderer & multi-submesh DOTS_INSTANCING_ON compliance, 8-item official URP Render Graph C# pass checklist with capture-safe PassData field-hoisting auto-fixer, virtualized UI Toolkit Painter2D dashboard, and dual-channel Live MCP Server.",
   "unity": "2022.3",

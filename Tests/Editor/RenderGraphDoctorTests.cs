@@ -59,6 +59,8 @@ Shader ""Custom/TestDotsReadyLit""
         {
             HLSLPROGRAM
             #pragma target 4.5
+            #pragma vertex vert
+            #pragma fragment frag
             #pragma multi_compile _ DOTS_INSTANCING_ON
             #pragma multi_compile _ LOD_FADE_CROSSFADE
             float4 vert() : SV_Position { return 0; }
@@ -76,6 +78,8 @@ Shader ""Custom/TestNoDotsLegacy""
         Pass
         {
             HLSLPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
             float4 vert() : SV_Position { return 0; }
             float4 frag() : SV_Target { return 1; }
             ENDHLSL
@@ -470,7 +474,7 @@ public class UnsafeThisCallPass : ScriptableRenderPass
             string initRes = RenderGraphDoctorMcpBridge.HandleJsonRpcRequest(
                 @"{""jsonrpc"":""2.0"",""id"":1,""method"":""initialize""}");
             StringAssert.Contains(@"""protocolVersion"":""2024-11-05""", initRes);
-            StringAssert.Contains(@"""version"":""2.0.0""", initRes);
+            StringAssert.Contains(@"""version"":""2.0.1""", initRes);
 
             Assert.AreEqual(string.Empty, RenderGraphDoctorMcpBridge.HandleJsonRpcRequest(
                 @"{""jsonrpc"":""2.0"",""method"":""notifications/initialized""}"));
